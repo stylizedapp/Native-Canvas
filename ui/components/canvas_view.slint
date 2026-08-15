@@ -1,0 +1,95 @@
+import { Theme } from "../theme.slint";
+
+// Центральная область: статус-бар сверху + viewport холста (Render-to-Texture).
+export component CanvasView {
+    in-out property <image> canvas-texture;
+    in-out property <string> zoom-text: "";
+    in-out property <string> fps-text: "";
+    in-out property <string> status-text: "";
+    in-out property <bool> debug-show: false;
+    in-out property <string> debug-text: "";
+
+    // Фактический размер области холста (заполняется лейаутом).
+    in-out property <float> canvas-width: canvas-area.width / 1px;
+    in-out property <float> canvas-height: canvas-area.height / 1px;
+
+    callback canvas-size-changed(float, float);
+    callback pointer-down(int, float, float);
+    callback pointer-move(int, float, float);
+    callback pointer-up(int, float, float);
+    callback scroll(float, float, float);
+
+    changed canvas-width => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
+    changed canvas-height => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
+
+    function btn(b: PointerEventButton) -> int {
+        if (b == PointerEventButton.left) { return 1; }
+        if (b == PointerEventButton.middle) { return 2; }
+        return 3;
+    }
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 32px;
+            background: Theme.bg-topbar;
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                spacing: 16px;
+                Text { text: root.zoom-text; color: Theme.ok; font-weight: 700; vertical-alignment: center; }
+                Text { text: root.fps-text; color: Theme.ok; font-weight: 700; vertical-alignment: center; }
+                Text { text: root.status-text; color: Theme.text-dim; vertical-alignment: center; }
+            }
+        }
+
+        canvas-area := Rectangle {
+            clip: true;
+            Image {
+                width: 100%;
+                height: 100%;
+                source: root.canvas-texture;
+                image-rendering: smooth;
+            }
+
+            TouchArea {
+                pointer-event(event) => {
+                    if (event.kind == PointerEventKind.down) {
+                        root.pointer-down(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
+                    } else if (event.kind == PointerEventKind.up) {
+                        root.pointer-up(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
+                }
+                moved => {
+                    root.pointer-move(0, self.mouse-x / 1px, self.mouse-y / 1px);
+                }
+                scroll-event(event) => {
+                    root.scroll(event.delta-y / 1px, self.mouse-x / 1px, self.mouse-y / 1px);
+                    accept
+                }
+            }
+
+            // Оверлей дебагера
+            if root.debug-show : Rectangle {
+                x: 8px;
+                y: 8px;
+                width: 340px;
+                height: 220px;
+                background: Theme.debug-bg;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: Theme.border;
+                Text {
+                    text: root.debug-text;
+                    color: Theme.heading;
+                    font-family: "Consolas";
+                    font-size: 12px;
+                    x: 10px;
+                    y: 10px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

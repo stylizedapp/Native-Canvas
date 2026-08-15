@@ -1,0 +1,42 @@
+import { ListView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+export struct LayerItem {
+    id: int,
+    name: string,
+    depth: int,
+}
+
+// Дерево слоёв. Получает готовую модель из ядра; изменение стиля здесь
+// не затрагивает сцену.
+export component LayersPanel {
+    in-out property <[LayerItem]> layers;
+    in-out property <int> selected-layer: -1;
+
+    callback select-layer(int);
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        Text { text: "Layers"; color: Theme.heading; font-weight: 700; }
+
+        ListView {
+            for item in root.layers : Rectangle {
+                height: 24px;
+                width: 100%;
+                background: (root.selected-layer == item.id) ? Theme.accent : transparent;
+                TouchArea {
+                    clicked => { root.select-layer(item.id); }
+                    Text {
+                        text: item.name;
+                        color: Theme.text;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        x: 4px + (item.depth * 10px);
+                    }
+                }
+            }
+        }
+    }
+}

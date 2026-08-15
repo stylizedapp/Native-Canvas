@@ -1,0 +1,105 @@
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+// Строка «метка + поле». Поле НЕ привязано к живой формуле: текст управляется
+// из Rust (только при смене выделения и после commit), поэтому ввод не затирается.
+component NumberField inherits HorizontalLayout {
+    in property <string> label;
+    in-out property <string> value;
+    callback set-value(string);
+
+    spacing: 4px;
+
+    Text {
+        width: 36px;
+        text: root.label;
+        color: Theme.text-dim;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+    LineEdit {
+        text: root.value;
+        edited(t) => { root.set-value(t); }
+    }
+}
+
+// Правая панель: параметры выделенного узла.
+export component Inspector {
+    in-out property <bool> has-selection: false;
+    in-out property <string> sel-name: "";
+    in-out property <string> sel-x-text: "";
+    in-out property <string> sel-y-text: "";
+    in-out property <string> sel-w-text: "";
+    in-out property <string> sel-h-text: "";
+    in-out property <string> sel-opacity-text: "";
+    in-out property <string> sel-fill: "";
+
+    callback set-name(string);
+    callback set-x(string);
+    callback set-y(string);
+    callback set-w(string);
+    callback set-h(string);
+    callback set-opacity(string);
+    callback set-fill(string);
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 6px;
+
+        Text { text: "Properties"; color: Theme.heading; font-weight: 700; }
+
+        VerticalLayout {
+            visible: root.has-selection;
+            spacing: 4px;
+
+            Text { text: "Name"; color: Theme.text-dim; font-size: 12px; }
+            LineEdit {
+                text: root.sel-name;
+                edited(t) => { root.set-name(t); }
+            }
+
+            Text { text: "X / Y"; color: Theme.text-dim; font-size: 12px; }
+            NumberField {
+                label: "X";
+                value: root.sel-x-text;
+                set-value(t) => { root.set-x(t); }
+            }
+            NumberField {
+                label: "Y";
+                value: root.sel-y-text;
+                set-value(t) => { root.set-y(t); }
+            }
+
+            Text { text: "W / H"; color: Theme.text-dim; font-size: 12px; }
+            NumberField {
+                label: "W";
+                value: root.sel-w-text;
+                set-value(t) => { root.set-w(t); }
+            }
+            NumberField {
+                label: "H";
+                value: root.sel-h-text;
+                set-value(t) => { root.set-h(t); }
+            }
+
+            Text { text: "Opacity"; color: Theme.text-dim; font-size: 12px; }
+            NumberField {
+                label: "%";
+                value: root.sel-opacity-text;
+                set-value(t) => { root.set-opacity(t); }
+            }
+
+            Text { text: "Fill"; color: Theme.text-dim; font-size: 12px; }
+            LineEdit {
+                text: root.sel-fill;
+                edited(t) => { root.set-fill(t); }
+            }
+        }
+
+        Text {
+            text: "Select a node";
+            color: Theme.text-dim;
+            visible: !root.has-selection;
+        }
+    }
+}

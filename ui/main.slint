@@ -1,0 +1,147 @@
+import { Theme } from "theme.slint";
+import { Toolbar } from "components/toolbar.slint";
+import { LayerItem, LayersPanel } from "components/layers_panel.slint";
+import { Inspector } from "components/inspector.slint";
+import { CanvasView } from "components/canvas_view.slint";
+
+// Корневой компонент: разводка панелей и связывание props/callbacks.
+// Сцена (Rust) общается с UI только через типизированные свойства и колбэки.
+export component AppWindow inherits Window {
+    title: "NativeCanvas";
+    preferred-width: 1280px;
+    preferred-height: 800px;
+    background: Theme.bg-canvas;
+
+    in-out property <image> canvas-texture;
+    in-out property <string> zoom-text: "100%";
+    in-out property <string> fps-text: "FPS --";
+    in-out property <string> status-text: "Ready";
+    in-out property <string> tool: "select";
+    in-out property <[LayerItem]> layers;
+    in-out property <int> selected-layer: -1;
+    // Дебагер
+    in-out property <bool> debug-show: false;
+    in-out property <string> debug-text: "";
+    // Фактический размер области холста (приходит из CanvasView).
+    in-out property <float> canvas-width: 1;
+    in-out property <float> canvas-height: 1;
+    // Сетка / снап
+    in-out property <bool> grid-on: true;
+    in-out property <bool> snap-on: true;
+
+    // Инспектор выделенного узла (тексты полей — строки, управляются из Rust).
+    in-out property <bool> has-selection: false;
+    in-out property <string> sel-name: "";
+    in-out property <string> sel-x-text: "";
+    in-out property <string> sel-y-text: "";
+    in-out property <string> sel-w-text: "";
+    in-out property <string> sel-h-text: "";
+    in-out property <string> sel-opacity-text: "";
+    in-out property <string> sel-fill: "";
+
+    // Callbacks ядра
+    callback tool-changed(string);
+    callback undo();
+    callback redo();
+    callback delete-selection();
+    callback new-doc();
+    callback save-doc();
+    callback open-doc();
+    callback pointer-down(int, float, float);
+    callback pointer-move(int, float, float);
+    callback pointer-up(int, float, float);
+    callback scroll(float, float, float);
+    callback select-layer(int);
+    callback toggle-grid();
+    callback toggle-snap();
+    callback toggle-debug();
+    // Инспектор
+    callback set-name(string);
+    callback set-x(string);
+    callback set-y(string);
+    callback set-w(string);
+    callback set-h(string);
+    callback set-opacity(string);
+    callback set-fill(string);
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        // ===== Левая панель: инструменты + слои =====
+        Rectangle {
+            width: 240px;
+            background: Theme.bg-panel;
+
+            VerticalLayout {
+                spacing: 0px;
+
+                Toolbar {
+                    active-tool: root.tool;
+                    grid-on: root.grid-on;
+                    snap-on: root.snap-on;
+                    debug-on: root.debug-show;
+                    tool-selected(t) => { root.tool-changed(t); }
+                    undo() => { root.undo(); }
+                    redo() => { root.redo(); }
+                    delete-selection() => { root.delete-selection(); }
+                    new-doc() => { root.new-doc(); }
+                    open-doc() => { root.open-doc(); }
+                    save-doc() => { root.save-doc(); }
+                    toggle-grid() => { root.toggle-grid(); }
+                    toggle-snap() => { root.toggle-snap(); }
+                    toggle-debug() => { root.toggle-debug(); }
+                }
+
+                Rectangle { height: 1px; background: Theme.border; }
+
+                LayersPanel {
+                    layers: root.layers;
+                    selected-layer: root.selected-layer;
+                    select-layer(id) => { root.select-layer(id); }
+                }
+            }
+        }
+
+        // ===== Центр: viewport холста =====
+        CanvasView {
+            canvas-texture: root.canvas-texture;
+            zoom-text: root.zoom-text;
+            fps-text: root.fps-text;
+            status-text: root.status-text;
+            debug-show: root.debug-show;
+            debug-text: root.debug-text;
+            canvas-size-changed(w, h) => {
+                root.canvas-width = w;
+                root.canvas-height = h;
+            }
+            pointer-down(b, x, y) => { root.pointer-down(b, x, y); }
+            pointer-move(b, x, y) => { root.pointer-move(b, x, y); }
+            pointer-up(b, x, y) => { root.pointer-up(b, x, y); }
+            scroll(d, x, y) => { root.scroll(d, x, y); }
+        }
+
+        // ===== Правая панель: инспектор =====
+        Rectangle {
+            width: 280px;
+            background: Theme.bg-panel;
+
+            Inspector {
+                has-selection: root.has-selection;
+                sel-name: root.sel-name;
+                sel-x-text: root.sel-x-text;
+                sel-y-text: root.sel-y-text;
+                sel-w-text: root.sel-w-text;
+                sel-h-text: root.sel-h-text;
+                sel-opacity-text: root.sel-opacity-text;
+                sel-fill: root.sel-fill;
+                set-name(t) => { root.set-name(t); }
+                set-x(t) => { root.set-x(t); }
+                set-y(t) => { root.set-y(t); }
+                set-w(t) => { root.set-w(t); }
+                set-h(t) => { root.set-h(t); }
+                set-opacity(t) => { root.set-opacity(t); }
+                set-fill(t) => { root.set-fill(t); }
+            }
+        }
+    }
+}
