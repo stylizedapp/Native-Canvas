@@ -16,13 +16,14 @@ pollster = "0.4" # Синхронное ожидание wgpu-фьючеров �
 # Data Structures & Math
 slotmap = { version = "1.0", features = ["serde"] }
 im = "15" # Персистентные структуры данных для дешёвого Undo/Redo
-glam = "0.29" # Быстрая 2D/3D линейная алгебра и матрицы
+glam = { version = "0.29", features = ["serde"] } # Быстрая 2D/3D линейная алгебра и матрицы
+kurbo = { version = "0.13", features = ["serde"] } # Кривые Безье и контуры (единая версия с vello)
 
 # Native File Dialogs (Сохранить / Открыть)
 rfd = "0.15"
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", features = ["derive", "rc"] } # "rc" — для Arc<[u8]> в NodeKind::Image
 serde_json = "1.0"
 
 # Performance & Time

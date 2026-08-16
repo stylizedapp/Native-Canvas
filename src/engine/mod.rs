@@ -1,4 +1,5 @@
 pub mod scene;
+pub mod model;
 pub mod transform;
 pub mod grid;
 pub mod tool;

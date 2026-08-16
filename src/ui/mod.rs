@@ -22,7 +22,11 @@ const MAX_RENDER_DIM: f32 = 1920.0;
 /// Переиспользуемые буферы холста, статистика и кэш UI-строк (чтобы не
 /// переустанавливать неизменные свойства Slint на каждом кадре).
 pub struct CanvasState {
-    pub image: SharedPixelBuffer<Rgba8Pixel>,
+    /// Двойной буфер: пишем в слот, на который окно не ссылается (refcount=1),
+    /// чтобы `make_mut_bytes` не делал COW-копию 5 МБ на каждом кадре.
+    pub images: [SharedPixelBuffer<Rgba8Pixel>; 2],
+    /// Индекс буфера, отданного окну на прошлом кадре.
+    pub cur: usize,
     pub w: u32,
     pub h: u32,
     pub last_revision: u64,
@@ -38,12 +42,35 @@ pub struct CanvasState {
     pub last_fps_text: String,
     pub last_tool: String,
     pub last_grid_step_text: String,
+    // Кэш инспектора (диф против значений узла; поля не затирают ввод).
+    pub last_sel_name: String,
+    pub last_sel_x: String,
+    pub last_sel_y: String,
+    pub last_sel_w: String,
+    pub last_sel_h: String,
+    pub last_sel_opacity: String,
+    pub last_sel_fill: String,
+    // Момент последнего ввода пользователя в каждое поле (защита от затирания).
+    pub sel_edited_at: [Option<Instant>; 7],
+}
+
+/// Индексы полей инспектора в `sel_edited_at` и диф-кэше.
+#[derive(Clone, Copy, PartialEq)]
+enum SelField {
+    Name = 0,
+    X = 1,
+    Y = 2,
+    W = 3,
+    H = 4,
+    Opacity = 5,
+    Fill = 6,
 }
 
 impl CanvasState {
     pub fn new() -> Self {
         Self {
-            image: SharedPixelBuffer::new(1, 1),
+            images: [SharedPixelBuffer::new(1, 1), SharedPixelBuffer::new(1, 1)],
+            cur: 0,
             w: 0,
             h: 0,
             last_revision: u64::MAX,
@@ -57,6 +84,14 @@ impl CanvasState {
             last_fps_text: String::new(),
             last_tool: String::new(),
             last_grid_step_text: String::new(),
+            last_sel_name: String::new(),
+            last_sel_x: String::new(),
+            last_sel_y: String::new(),
+            last_sel_w: String::new(),
+            last_sel_h: String::new(),
+            last_sel_opacity: String::new(),
+            last_sel_fill: String::new(),
+            sel_edited_at: [None; 7],
         }
     }
 
@@ -67,7 +102,7 @@ impl CanvasState {
         if w != self.w || h != self.h {
             self.w = w;
             self.h = h;
-            self.image = SharedPixelBuffer::new(w, h);
+            self.images = [SharedPixelBuffer::new(w, h), SharedPixelBuffer::new(w, h)];
             true
         } else {
             false
@@ -81,7 +116,9 @@ impl Default for CanvasState {
     }
 }
 
-/// Один тик цикла рендера: рендерит и обновляет UI только если состояние изменилось.
+/// Один тик цикла рендера: рендерит и обновляет UI каждый кадр,
+/// чтобы канвас/инспектор/статистика всегда отражали состояние.
+/// Пауза только когда окно свёрнуто или скрыто.
 pub fn sync(
     window: &slint::Weak<AppWindow>,
     controller: &Controller,
@@ -90,8 +127,8 @@ pub fn sync(
 ) {
     let Some(w) = window.upgrade() else { return };
 
-    // Не рендерим, если окно свёрнуто/скрыто.
-    if !w.window().is_visible() {
+    // Пауза: окно свёрнуто или скрыто.
+    if !w.window().is_visible() || w.window().is_minimized() {
         return;
     }
 
@@ -109,19 +146,15 @@ pub fn sync(
 
     let mut c = controller.borrow_mut();
     let mut st = state.borrow_mut();
-    let size_changed = st.ensure(bw, bh);
+    st.ensure(bw, bh);
 
-    // Ничего не изменилось — ничего не делаем.
-    if !c.dirty && !size_changed {
-        return;
-    }
-
-    // Рендер прямо в переиспользуемый буфер.
+    // Рендер прямо в переиспользуемый буфер (не тот, что отдан окну).
     let render_cam = c.camera.for_render_scale(scale);
+    let next = st.cur ^ 1;
     let t0 = Instant::now();
     let submitted = {
         let (rw, rh) = (st.w, st.h);
-        let bytes = st.image.make_mut_bytes();
+        let bytes = st.images[next].make_mut_bytes();
         renderer.borrow_mut().render(
             &c.scene,
             &render_cam,
@@ -149,7 +182,8 @@ pub fn sync(
         st.fps_window = now;
     }
 
-    w.set_canvas_texture(Image::from_rgba8(st.image.clone()));
+    w.set_canvas_texture(Image::from_rgba8(st.images[next].clone()));
+    st.cur = next;
 
     // Верхняя плашка — только при изменении.
     let zoom = format!("{:.0}%", c.camera.zoom * 100.0);
@@ -182,15 +216,24 @@ pub fn sync(
     }
     w.set_selected_layer(c.scene.selection.first().map(|&i| i as i32).unwrap_or(-1));
 
-    // Инспектор — только при смене выделения (поля не затирают ввод).
-    let sel_changed = c.selected_id() != st.last_sel_id;
-    st.last_sel_id = c.selected_id();
+    // Инспектор: диф по значениям каждый кадр (живые правки при драге).
+    // При смене узла сбрасываем кэш и cooldown — все поля обновятся принудительно.
+    let sel_id = c.selected_id();
+    if sel_id != st.last_sel_id {
+        st.last_sel_id = sel_id;
+        st.last_sel_name.clear();
+        st.last_sel_x.clear();
+        st.last_sel_y.clear();
+        st.last_sel_w.clear();
+        st.last_sel_h.clear();
+        st.last_sel_opacity.clear();
+        st.last_sel_fill.clear();
+        st.sel_edited_at = [None; 7];
+    }
     match c.selected() {
         Some(n) => {
             w.set_has_selection(true);
-            if sel_changed {
-                set_sel_texts(&w, n);
-            }
+            update_sel(&w, n, &mut st);
         }
         None => w.set_has_selection(false),
     }
@@ -224,17 +267,31 @@ pub fn sync(
     );
 }
 
-pub fn register_inspector_callbacks(window: &AppWindow, controller: &Controller) {
+/// Поле инспектора только что отредактировано пользователем — помечаем,
+/// чтобы sync не затирал ввод в течение cooldown.
+fn mark_edited(st: &Rc<RefCell<CanvasState>>, field: SelField) {
+    st.borrow_mut().sel_edited_at[field as usize] = Some(Instant::now());
+}
+
+pub fn register_inspector_callbacks(
+    window: &AppWindow,
+    controller: &Controller,
+    state: &Rc<RefCell<CanvasState>>,
+) {
     let c = controller.clone();
     let weak = window.as_weak();
+    let st = state.clone();
     window.on_set_name(move |name| {
+        mark_edited(&st, SelField::Name);
         c.borrow_mut().set_name(name.as_str());
         refresh_sel(&weak, &c);
     });
 
     let c = controller.clone();
     let weak = window.as_weak();
+    let st = state.clone();
     window.on_set_x(move |v| {
+        mark_edited(&st, SelField::X);
         if let Ok(x) = v.trim().parse::<f32>() {
             let y = current_y(&c);
             c.borrow_mut().set_position(x, y);
@@ -244,7 +301,9 @@ pub fn register_inspector_callbacks(window: &AppWindow, controller: &Controller)
 
     let c = controller.clone();
     let weak = window.as_weak();
+    let st = state.clone();
     window.on_set_y(move |v| {
+        mark_edited(&st, SelField::Y);
         if let Ok(y) = v.trim().parse::<f32>() {
             let x = current_x(&c);
             c.borrow_mut().set_position(x, y);
@@ -254,7 +313,9 @@ pub fn register_inspector_callbacks(window: &AppWindow, controller: &Controller)
 
     let c = controller.clone();
     let weak = window.as_weak();
+    let st = state.clone();
     window.on_set_w(move |v| {
+        mark_edited(&st, SelField::W);
         if let Ok(w) = v.trim().parse::<f32>() {
             let h = current_h(&c);
             c.borrow_mut().set_size(w, h);
@@ -264,7 +325,9 @@ pub fn register_inspector_callbacks(window: &AppWindow, controller: &Controller)
 
     let c = controller.clone();
     let weak = window.as_weak();
+    let st = state.clone();
     window.on_set_h(move |v| {
+        mark_edited(&st, SelField::H);
         if let Ok(h) = v.trim().parse::<f32>() {
             let w = current_w(&c);
             c.borrow_mut().set_size(w, h);
@@ -274,7 +337,9 @@ pub fn register_inspector_callbacks(window: &AppWindow, controller: &Controller)
 
     let c = controller.clone();
     let weak = window.as_weak();
+    let st = state.clone();
     window.on_set_opacity(move |v| {
+        mark_edited(&st, SelField::Opacity);
         if let Ok(o) = v.trim().parse::<f32>() {
             c.borrow_mut().set_opacity(o / 100.0);
             refresh_sel(&weak, &c);
@@ -283,7 +348,9 @@ pub fn register_inspector_callbacks(window: &AppWindow, controller: &Controller)
 
     let c = controller.clone();
     let weak = window.as_weak();
+    let st = state.clone();
     window.on_set_fill(move |v| {
+        mark_edited(&st, SelField::Fill);
         c.borrow_mut().set_fill_hex(v.as_str());
         refresh_sel(&weak, &c);
     });
@@ -322,6 +389,48 @@ fn fmt_num(v: f32) -> String {
 /// Прозрачность в процентах.
 fn fmt_pct(opacity: f32) -> String {
     format!("{}", (opacity * 100.0).round() as i64)
+}
+
+/// Обновляет одно поле инспектора, если значение изменилось и поле не
+/// редактируется пользователем (cooldown ~1 c после последнего ввода).
+fn upd_field(
+    w: &AppWindow,
+    cache: &mut String,
+    edited_at: &mut Option<Instant>,
+    now: Instant,
+    value: String,
+    setter: impl FnOnce(&AppWindow, slint::SharedString),
+) {
+    if *cache == value {
+        return;
+    }
+    let being_edited = match edited_at {
+        Some(t) => now.duration_since(*t).as_secs_f64() < 1.0,
+        None => false,
+    };
+    if being_edited {
+        return;
+    }
+    *cache = value.clone();
+    setter(w, value.into());
+}
+
+/// Диф-обновление полей инспектора из узла (живой отклик при драге,
+/// без затирания полей, которые пользователь сейчас редактирует).
+fn update_sel(w: &AppWindow, n: &SceneNode, st: &mut CanvasState) {
+    let now = Instant::now();
+    upd_field(w, &mut st.last_sel_name, &mut st.sel_edited_at[SelField::Name as usize], now, n.name.clone(), AppWindow::set_sel_name);
+    upd_field(w, &mut st.last_sel_x, &mut st.sel_edited_at[SelField::X as usize], now, fmt_num(n.transform.translation.x), AppWindow::set_sel_x_text);
+    upd_field(w, &mut st.last_sel_y, &mut st.sel_edited_at[SelField::Y as usize], now, fmt_num(n.transform.translation.y), AppWindow::set_sel_y_text);
+    let (dw, dh) = dims(&n.kind);
+    upd_field(w, &mut st.last_sel_w, &mut st.sel_edited_at[SelField::W as usize], now, fmt_num(dw), AppWindow::set_sel_w_text);
+    upd_field(w, &mut st.last_sel_h, &mut st.sel_edited_at[SelField::H as usize], now, fmt_num(dh), AppWindow::set_sel_h_text);
+    upd_field(w, &mut st.last_sel_opacity, &mut st.sel_edited_at[SelField::Opacity as usize], now, fmt_pct(n.opacity), AppWindow::set_sel_opacity_text);
+    let fill = n
+        .fill
+        .map(|f| format!("#{:02X}{:02X}{:02X}", f.color[0], f.color[1], f.color[2]))
+        .unwrap_or_else(|| "#000000".into());
+    upd_field(w, &mut st.last_sel_fill, &mut st.sel_edited_at[SelField::Fill as usize], now, fill, AppWindow::set_sel_fill);
 }
 
 /// Заполняет поля инспектора из узла.

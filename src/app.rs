@@ -187,7 +187,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
     }
 
     // --- Инспектор ---
-    register_inspector_callbacks(&window, &controller);
+    register_inspector_callbacks(&window, &controller, &state);
 
     window.run()
 }
