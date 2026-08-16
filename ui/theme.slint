@@ -1,13 +1,44 @@
-// Централизованная тема UI. Изменение стиля приложения = правка этого файла.
+// Централизованная дизайн-система "Bento".
+// Все цвета/отступы/радиусы/шрифты — только здесь. Правка токенов = новый стиль.
 export global Theme {
-    in-out property <brush> bg-canvas: #1e1e1e;
-    in-out property <brush> bg-panel: #252526;
-    in-out property <brush> bg-topbar: #181818;
-    in-out property <brush> border: #3a3a3a;
-    in-out property <brush> heading: #9cdcfe;
-    in-out property <brush> text: #d4d4d4;
-    in-out property <brush> text-dim: #888888;
-    in-out property <brush> accent: #264f78;
-    in-out property <brush> ok: #00ff66;
-    in-out property <brush> debug-bg: #1c1c1cd8;
+    // --- Surfaces ---
+    in-out property <brush> bg: #161618;
+    in-out property <brush> surface: #1f1f23;
+    in-out property <brush> surface-raised: #26262b;
+    in-out property <brush> border: #2e2e34;
+    in-out property <brush> border-strong: #3a3a42;
+
+    // --- Text ---
+    in-out property <brush> text: #e8e8ea;
+    in-out property <brush> text-muted: #9a9aa2;
+    in-out property <brush> text-faint: #6a6a72;
+
+    // --- Accent / states ---
+    in-out property <brush> accent: #5b8cff;
+    in-out property <brush> accent-hover: #6e9aff;
+    in-out property <brush> accent-contrast: #0d0d0f;
+    in-out property <brush> selection: #2a3f66;
+    in-out property <brush> danger: #e5534b;
+
+    // --- Canvas (должен совпадать с base_color в Rust-рендере) ---
+    in-out property <brush> canvas-bg: #161618;
+
+    // --- Spacing (4pt сетка) ---
+    in-out property <length> space-0: 0px;
+    in-out property <length> space-1: 4px;
+    in-out property <length> space-2: 8px;
+    in-out property <length> space-3: 12px;
+    in-out property <length> space-4: 16px;
+    in-out property <length> space-5: 24px;
+
+    // --- Radii ---
+    in-out property <length> radius-sm: 8px;
+    in-out property <length> radius-md: 12px;
+    in-out property <length> radius-lg: 16px;
+
+    // --- Typography ---
+    in-out property <length> font-xs: 11px;
+    in-out property <length> font-sm: 12px;
+    in-out property <length> font-md: 14px;
+    in-out property <length> font-lg: 16px;
 }

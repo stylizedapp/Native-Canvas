@@ -1,103 +1,28 @@
-import { Button } from "std-widgets.slint";
+import { ToolButton } from "ds.slint";
 import { Theme } from "../theme.slint";
 
-// Панель инструментов: инструменты, история, файлы, сетка/снап, дебагер.
-export component Toolbar {
+// Плавающая панель инструментов («пилюля») — вешается поверх канваса
+// в CanvasView, по центру сверху.
+export component Toolbar inherits Rectangle {
     in-out property <string> active-tool: "select";
-    in-out property <bool> grid-on: true;
-    in-out property <bool> snap-on: true;
-    in-out property <bool> debug-on: false;
 
     callback tool-selected(string);
-    callback undo();
-    callback redo();
-    callback delete-selection();
-    callback new-doc();
-    callback open-doc();
-    callback save-doc();
-    callback toggle-grid();
-    callback toggle-snap();
-    callback toggle-debug();
 
-    VerticalLayout {
-        padding: 8px;
-        spacing: 6px;
+    width: 376px;
+    height: 44px;
+    background: Theme.surface;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: Theme.border;
 
-        Text { text: "Tools"; color: Theme.heading; font-weight: 700; }
-
-        HorizontalLayout {
-            spacing: 4px;
-            Button {
-                text: "V";
-                checked: root.active-tool == "select";
-                clicked => { root.tool-selected("select"); }
-            }
-            Button {
-                text: "H";
-                checked: root.active-tool == "pan";
-                clicked => { root.tool-selected("pan"); }
-            }
-        }
-        HorizontalLayout {
-            spacing: 4px;
-            Button {
-                text: "Rect";
-                checked: root.active-tool == "rectangle";
-                clicked => { root.tool-selected("rectangle"); }
-            }
-            Button {
-                text: "Ell";
-                checked: root.active-tool == "ellipse";
-                clicked => { root.tool-selected("ellipse"); }
-            }
-        }
-        HorizontalLayout {
-            spacing: 4px;
-            Button {
-                text: "Line";
-                checked: root.active-tool == "line";
-                clicked => { root.tool-selected("line"); }
-            }
-            Button {
-                text: "Frame";
-                checked: root.active-tool == "frame";
-                clicked => { root.tool-selected("frame"); }
-            }
-        }
-
-        HorizontalLayout {
-            spacing: 4px;
-            Button { text: "Undo"; clicked => { root.undo(); } }
-            Button { text: "Redo"; clicked => { root.redo(); } }
-        }
-        Button { text: "Delete"; clicked => { root.delete-selection(); } }
-
-        Rectangle { height: 1px; background: Theme.border; }
-
-        HorizontalLayout {
-            spacing: 4px;
-            Button { text: "New"; clicked => { root.new-doc(); } }
-            Button { text: "Open"; clicked => { root.open-doc(); } }
-            Button { text: "Save"; clicked => { root.save-doc(); } }
-        }
-
-        HorizontalLayout {
-            spacing: 4px;
-            Button {
-                text: "Grid";
-                checked: root.grid-on;
-                clicked => { root.toggle-grid(); }
-            }
-            Button {
-                text: "Snap";
-                checked: root.snap-on;
-                clicked => { root.toggle-snap(); }
-            }
-        }
-        Button {
-            text: "Debug";
-            checked: root.debug-on;
-            clicked => { root.toggle-debug(); }
-        }
+    HorizontalLayout {
+        padding: Theme.space-1;
+        spacing: Theme.space-1;
+        ToolButton { horizontal-stretch: 1; text: "V"; active: root.active-tool == "select"; clicked => { root.tool-selected("select"); } }
+        ToolButton { horizontal-stretch: 1; text: "H"; active: root.active-tool == "pan"; clicked => { root.tool-selected("pan"); } }
+        ToolButton { horizontal-stretch: 1; text: "Rect"; active: root.active-tool == "rectangle"; clicked => { root.tool-selected("rectangle"); } }
+        ToolButton { horizontal-stretch: 1; text: "Ell"; active: root.active-tool == "ellipse"; clicked => { root.tool-selected("ellipse"); } }
+        ToolButton { horizontal-stretch: 1; text: "Line"; active: root.active-tool == "line"; clicked => { root.tool-selected("line"); } }
+        ToolButton { horizontal-stretch: 1; text: "Frame"; active: root.active-tool == "frame"; clicked => { root.tool-selected("frame"); } }
     }
 }

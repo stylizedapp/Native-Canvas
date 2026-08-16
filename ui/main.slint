@@ -1,16 +1,16 @@
 import { Theme } from "theme.slint";
-import { Toolbar } from "components/toolbar.slint";
+import { BentoColumn, BentoGrid, Panel, SectionHeader, ActionButton, NumberField, TopBar } from "components/ds.slint";
 import { LayerItem, LayersPanel } from "components/layers_panel.slint";
 import { Inspector } from "components/inspector.slint";
 import { CanvasView } from "components/canvas_view.slint";
 
-// Корневой компонент: разводка панелей и связывание props/callbacks.
-// Сцена (Rust) общается с UI только через типизированные свойства и колбэки.
+// Корневой компонент: Bento-воркспейс. Сцена (Rust) общается с UI только
+// через типизированные свойства и колбэки (см. AppWindow).
 export component AppWindow inherits Window {
     title: "NativeCanvas";
     preferred-width: 1280px;
     preferred-height: 800px;
-    background: Theme.bg-canvas;
+    background: Theme.bg;
 
     in-out property <image> canvas-texture;
     in-out property <string> zoom-text: "100%";
@@ -28,6 +28,7 @@ export component AppWindow inherits Window {
     // Сетка / снап
     in-out property <bool> grid-on: true;
     in-out property <bool> snap-on: true;
+    in-out property <string> grid-step-text: "8";
 
     // Инспектор выделенного узла (тексты полей — строки, управляются из Rust).
     in-out property <bool> has-selection: false;
@@ -55,6 +56,8 @@ export component AppWindow inherits Window {
     callback toggle-grid();
     callback toggle-snap();
     callback toggle-debug();
+    callback set-grid-step(string);
+    callback reset-view();
     // Инспектор
     callback set-name(string);
     callback set-x(string);
@@ -64,83 +67,96 @@ export component AppWindow inherits Window {
     callback set-opacity(string);
     callback set-fill(string);
 
-    HorizontalLayout {
-        spacing: 0px;
+    VerticalLayout {
+        padding: Theme.space-3;
+        spacing: Theme.space-3;
 
-        // ===== Левая панель: инструменты + слои =====
-        Rectangle {
-            width: 240px;
-            background: Theme.bg-panel;
-
-            VerticalLayout {
-                spacing: 0px;
-
-                Toolbar {
-                    active-tool: root.tool;
-                    grid-on: root.grid-on;
-                    snap-on: root.snap-on;
-                    debug-on: root.debug-show;
-                    tool-selected(t) => { root.tool-changed(t); }
-                    undo() => { root.undo(); }
-                    redo() => { root.redo(); }
-                    delete-selection() => { root.delete-selection(); }
-                    new-doc() => { root.new-doc(); }
-                    open-doc() => { root.open-doc(); }
-                    save-doc() => { root.save-doc(); }
-                    toggle-grid() => { root.toggle-grid(); }
-                    toggle-snap() => { root.toggle-snap(); }
-                    toggle-debug() => { root.toggle-debug(); }
-                }
-
-                Rectangle { height: 1px; background: Theme.border; }
-
-                LayersPanel {
-                    layers: root.layers;
-                    selected-layer: root.selected-layer;
-                    select-layer(id) => { root.select-layer(id); }
-                }
-            }
+        TopBar {
+            zoom: root.zoom-text;
+            fps: root.fps-text;
+            status: root.status-text;
         }
 
-        // ===== Центр: viewport холста =====
-        CanvasView {
-            canvas-texture: root.canvas-texture;
-            zoom-text: root.zoom-text;
-            fps-text: root.fps-text;
-            status-text: root.status-text;
-            debug-show: root.debug-show;
-            debug-text: root.debug-text;
-            canvas-size-changed(w, h) => {
-                root.canvas-width = w;
-                root.canvas-height = h;
+        BentoGrid {
+            // ===== Левая колонка: слои + дебагер =====
+            BentoColumn {
+                width: 232px;
+
+                Panel {
+                    SectionHeader { caption: "Layers"; }
+                    LayersPanel {
+                        vertical-stretch: 1;
+                        layers: root.layers;
+                        selected-layer: root.selected-layer;
+                        select-layer(id) => { root.select-layer(id); }
+                    }
+                }
+
+                Panel {
+                    pad: Theme.space-2;
+                    ActionButton { text: "Debug"; checked: root.debug-show; clicked => { root.toggle-debug(); } }
+                }
             }
-            pointer-down(b, x, y) => { root.pointer-down(b, x, y); }
-            pointer-move(b, x, y) => { root.pointer-move(b, x, y); }
-            pointer-up(b, x, y) => { root.pointer-up(b, x, y); }
-            scroll(d, x, y) => { root.scroll(d, x, y); }
-        }
 
-        // ===== Правая панель: инспектор =====
-        Rectangle {
-            width: 280px;
-            background: Theme.bg-panel;
+            // ===== Центр: viewport холста (инструменты плавают поверх) =====
+            CanvasView {
+                horizontal-stretch: 1;
+                vertical-stretch: 1;
+                canvas-texture: root.canvas-texture;
+                debug-show: root.debug-show;
+                debug-text: root.debug-text;
+                active-tool: root.tool;
+                canvas-size-changed(w, h) => {
+                    root.canvas-width = w;
+                    root.canvas-height = h;
+                }
+                pointer-down(b, x, y) => { root.pointer-down(b, x, y); }
+                pointer-move(b, x, y) => { root.pointer-move(b, x, y); }
+                pointer-up(b, x, y) => { root.pointer-up(b, x, y); }
+                scroll(d, x, y) => { root.scroll(d, x, y); }
+                tool-selected(t) => { root.tool-changed(t); }
+            }
 
-            Inspector {
-                has-selection: root.has-selection;
-                sel-name: root.sel-name;
-                sel-x-text: root.sel-x-text;
-                sel-y-text: root.sel-y-text;
-                sel-w-text: root.sel-w-text;
-                sel-h-text: root.sel-h-text;
-                sel-opacity-text: root.sel-opacity-text;
-                sel-fill: root.sel-fill;
-                set-name(t) => { root.set-name(t); }
-                set-x(t) => { root.set-x(t); }
-                set-y(t) => { root.set-y(t); }
-                set-w(t) => { root.set-w(t); }
-                set-h(t) => { root.set-h(t); }
-                set-opacity(t) => { root.set-opacity(t); }
-                set-fill(t) => { root.set-fill(t); }
+            // ===== Правая колонка: инспектор + настройки =====
+            BentoColumn {
+                width: 280px;
+
+                Inspector {
+                    has-selection: root.has-selection;
+                    sel-name: root.sel-name;
+                    sel-x-text: root.sel-x-text;
+                    sel-y-text: root.sel-y-text;
+                    sel-w-text: root.sel-w-text;
+                    sel-h-text: root.sel-h-text;
+                    sel-opacity-text: root.sel-opacity-text;
+                    sel-fill: root.sel-fill;
+                    set-name(t) => { root.set-name(t); }
+                    set-x(t) => { root.set-x(t); }
+                    set-y(t) => { root.set-y(t); }
+                    set-w(t) => { root.set-w(t); }
+                    set-h(t) => { root.set-h(t); }
+                    set-opacity(t) => { root.set-opacity(t); }
+                    set-fill(t) => { root.set-fill(t); }
+                }
+
+                Panel {
+                    SectionHeader { caption: "Settings"; }
+                    HorizontalLayout {
+                        spacing: Theme.space-1;
+                        ActionButton { horizontal-stretch: 1; text: "Grid"; checked: root.grid-on; clicked => { root.toggle-grid(); } }
+                        ActionButton { horizontal-stretch: 1; text: "Snap"; checked: root.snap-on; clicked => { root.toggle-snap(); } }
+                    }
+                    NumberField {
+                        label: "Step";
+                        value: root.grid-step-text;
+                        set-value(t) => { root.set-grid-step(t); }
+                    }
+                    HorizontalLayout {
+                        spacing: Theme.space-1;
+                        ActionButton { horizontal-stretch: 1; text: "Reset view"; clicked => { root.reset-view(); } }
+                        ActionButton { horizontal-stretch: 1; text: "Delete"; clicked => { root.delete-selection(); } }
+                    }
+                }
             }
         }
     }

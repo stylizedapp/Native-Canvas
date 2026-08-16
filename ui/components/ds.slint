@@ -1,0 +1,195 @@
+import { Theme } from "../theme.slint";
+
+// ============ Дизайн-система "Bento": примитивы ============
+
+// Карточка-секция. Содержимое передаётся через @children.
+export component Panel inherits Rectangle {
+    in property <length> pad: Theme.space-3;
+
+    background: Theme.surface;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    VerticalLayout {
+        padding: root.pad;
+        spacing: Theme.space-2;
+        @children
+    }
+}
+
+// Заголовок секции.
+export component SectionHeader inherits Text {
+    in property <string> caption: "";
+    text: root.caption;
+    color: Theme.text;
+    font-size: Theme.font-sm;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+}
+
+// Тонкий разделитель.
+export component Divider inherits Rectangle {
+    height: 1px;
+    background: Theme.border;
+}
+
+// Горизонтальная bento-сетка (карточки в ряд).
+export component BentoGrid inherits HorizontalLayout {
+    spacing: Theme.space-3;
+    @children
+}
+
+// Вертикальная bento-колонка (карточки в столбик).
+export component BentoColumn inherits VerticalLayout {
+    spacing: Theme.space-3;
+    @children
+}
+
+// Верхняя плашка приложения (название + статус + zoom/fps).
+export component TopBar inherits Rectangle {
+    in property <string> zoom: "";
+    in property <string> fps: "";
+    in property <string> status: "";
+
+    height: 40px;
+    background: Theme.surface;
+    border-radius: Theme.radius-md;
+    border-width: 1px;
+    border-color: Theme.border;
+
+    HorizontalLayout {
+        padding-left: Theme.space-4;
+        padding-right: Theme.space-4;
+        spacing: Theme.space-3;
+        Text {
+            text: "NativeCanvas";
+            color: Theme.text;
+            font-weight: 700;
+            font-size: Theme.font-md;
+            vertical-alignment: center;
+        }
+        Rectangle {
+            width: 1px;
+            background: Theme.border;
+        }
+        Text {
+            text: root.status;
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        HorizontalLayout { horizontal-stretch: 1; }
+        Text {
+            text: root.fps;
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.zoom;
+            color: Theme.accent;
+            font-weight: 700;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Кнопка-инструмент (активная — залита акцентом).
+export component ToolButton inherits Rectangle {
+    in property <string> text: "";
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 32px;
+    border-radius: Theme.radius-sm;
+    background: root.active ? Theme.accent : (touch.pressed ? Theme.surface-raised : Theme.surface);
+    border-width: 1px;
+    border-color: root.active ? Theme.accent : Theme.border;
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        Text {
+            text: root.text;
+            color: root.active ? Theme.accent-contrast : Theme.text;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Кнопка действия (опционально чекнутая — для переключателей).
+export component ActionButton inherits Rectangle {
+    in property <string> text: "";
+    in property <bool> checked: false;
+    callback clicked();
+
+    height: 30px;
+    border-radius: Theme.radius-sm;
+    background: root.checked ? Theme.accent : (touch.pressed ? Theme.surface-raised : Theme.surface);
+    border-width: 1px;
+    border-color: root.checked ? Theme.accent : Theme.border-strong;
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        Text {
+            text: root.text;
+            color: root.checked ? Theme.accent-contrast : Theme.text;
+            font-size: Theme.font-sm;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Поле ввода: нативный TextInput в собственной рамке (без стиля fluent).
+// commit происходит по Enter (accepted), live-изменения — по edited.
+export component Field inherits Rectangle {
+    in property <string> text: "";
+    callback edited(string);
+    callback accepted(string);
+
+    height: 30px;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    background: Theme.bg;
+    clip: true;
+
+    VerticalLayout {
+        padding-left: Theme.space-2;
+        padding-right: Theme.space-2;
+        input := TextInput {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            edited => { root.edited(self.text); }
+            accepted => { root.accepted(self.text); }
+        }
+    }
+}
+
+// Строка «метка + числовое поле».
+export component NumberField inherits HorizontalLayout {
+    in property <string> label: "";
+    in property <string> value: "";
+    callback set-value(string);
+
+    spacing: Theme.space-2;
+
+    Text {
+        width: 24px;
+        text: root.label;
+        color: Theme.text-muted;
+        font-size: Theme.font-sm;
+        vertical-alignment: center;
+    }
+    Field {
+        horizontal-stretch: 1;
+        text: root.value;
+        accepted(t) => { root.set-value(t); }
+    }
+}

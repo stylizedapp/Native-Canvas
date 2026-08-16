@@ -1,4 +1,4 @@
-use crate::engine::scene::{Scene, SceneNode, NodeKind, NodeId};
+use crate::engine::scene::{Scene, NodeKind, NodeId};
 use glam::{Affine2, Vec2};
 
 /// Камера холста: панорамирование и масштабирование.
@@ -98,7 +98,7 @@ fn precise_hit(scene: &Scene, id: NodeId, world: Vec2) -> bool {
                 // Эллипс: проверка по эллиптическому уравнению в локальных координатах.
                 hit_ellipse(scene, id, world)
             }
-            NodeKind::Line { x2, y2 } => hit_line(n, world, x2, y2),
+            NodeKind::Line { x2, y2 } => hit_line(scene, id, world, x2, y2),
             NodeKind::Group => false,
             NodeKind::Vector => false,
         },
@@ -122,14 +122,17 @@ fn hit_ellipse(scene: &Scene, id: NodeId, world: Vec2) -> bool {
     dx * dx + dy * dy <= 1.0
 }
 
-fn hit_line(node: &SceneNode, world: Vec2, x2: f32, y2: f32) -> bool {
+fn hit_line(scene: &Scene, id: NodeId, world: Vec2, x2: f32, y2: f32) -> bool {
+    let Some(node) = scene.get(id) else { return false };
+    // Переводим точку в локальные координаты линии (она учитывает transform).
+    let local = scene.world_transform(id).inverse().transform_point2(world);
     let a = Vec2::ZERO;
     let b = Vec2::new(x2, y2);
     // Проверка на дистанцию от точки до отрезка.
     let ab = b - a;
     let ab2 = ab.length_squared();
-    let t = if ab2 == 0.0 { 0.0 } else { ((world - a).dot(ab) / ab2).clamp(0.0, 1.0) };
+    let t = if ab2 == 0.0 { 0.0 } else { ((local - a).dot(ab) / ab2).clamp(0.0, 1.0) };
     let closest = a + ab * t;
     let tolerance = node.stroke.map(|s| (s.width / 2.0) + 4.0).unwrap_or(4.0);
-    (world - closest).length() <= tolerance
+    (local - closest).length() <= tolerance
 }

@@ -1,43 +1,10 @@
+use super::grid::GridConfig;
 use super::history::History;
 use super::scene::{Fill, NodeKind, NodeId, Scene, SceneNode, Stroke};
+use super::tool::Tool;
 use super::transform::{pick, Camera};
 use crate::engine::serialize::{load_json, save_json};
 use glam::{Affine2, Vec2};
-
-/// Активный инструмент.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum Tool {
-    Select,
-    Pan,
-    Rectangle,
-    Ellipse,
-    Line,
-    Frame,
-}
-
-impl Tool {
-    pub fn from_name(name: &str) -> Self {
-        match name {
-            "pan" => Tool::Pan,
-            "rectangle" => Tool::Rectangle,
-            "ellipse" => Tool::Ellipse,
-            "line" => Tool::Line,
-            "frame" => Tool::Frame,
-            _ => Tool::Select,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            Tool::Select => "select",
-            Tool::Pan => "pan",
-            Tool::Rectangle => "rectangle",
-            Tool::Ellipse => "ellipse",
-            Tool::Line => "line",
-            Tool::Frame => "frame",
-        }
-    }
-}
 
 /// Live-превью создаваемой фигуры (в мировых координатах).
 #[derive(Clone, Debug)]
@@ -74,12 +41,8 @@ pub struct CanvasController {
     pub dirty: bool,
     /// Ревизия структуры сцены — для пересборки дерева слоёв в UI.
     pub revision: u64,
-    /// Показывать сетку.
-    pub grid_visible: bool,
-    /// Привязка к сетке (плюс всегда к целым пикселям).
-    pub snap_enabled: bool,
-    /// Шаг сетки (в мировых px).
-    pub grid_step: f32,
+    /// Показывать сетку, привязка, шаг.
+    pub grid: GridConfig,
 }
 
 impl CanvasController {
@@ -93,9 +56,7 @@ impl CanvasController {
             preview: None,
             dirty: true,
             revision: 0,
-            grid_visible: true,
-            snap_enabled: true,
-            grid_step: 8.0,
+            grid: GridConfig::new(),
         };
         // Стартовое демо-содержимое.
         c.add_root_node(Tool::Frame, Vec2::new(80.0, 80.0), Vec2::new(400.0, 320.0));
@@ -143,28 +104,35 @@ impl CanvasController {
     // --- Сетка / снап ---
 
     pub fn toggle_grid(&mut self) {
-        self.grid_visible = !self.grid_visible;
+        self.grid.visible = !self.grid.visible;
         self.dirty = true;
     }
 
     pub fn toggle_snap(&mut self) {
-        self.snap_enabled = !self.snap_enabled;
+        self.grid.snap = !self.grid.snap;
+        self.dirty = true;
+    }
+
+    /// Устанавливает шаг сетки (в мировых px).
+    pub fn set_grid_step(&mut self, step: f32) {
+        self.grid.step = step.clamp(1.0, 256.0);
+        self.dirty = true;
+    }
+
+    /// Сбрасывает камеру (zoom = 100%, без панорамирования).
+    pub fn reset_view(&mut self) {
+        self.camera = Camera::new();
         self.dirty = true;
     }
 
     /// Привязка точки к сетке (если включена) и всегда к целым пикселям.
     pub fn snap_point(&self, p: Vec2) -> Vec2 {
-        if self.snap_enabled {
-            let s = self.grid_step.max(1.0);
-            Vec2::new((p.x / s).round() * s, (p.y / s).round() * s)
-        } else {
-            Vec2::new(p.x.round(), p.y.round())
-        }
+        self.grid.snap_point(p)
     }
 
     /// Привязка размера: только к целым пикселям (сетка на размеры не влияет).
     fn snap_size(&self, p: Vec2) -> Vec2 {
-        Vec2::new(p.x.round(), p.y.round())
+        self.grid.snap_size(p)
     }
 
     /// Создаёт корневой узел по инструменту из прямоугольника (anchor..current).
@@ -190,7 +158,9 @@ impl CanvasController {
 
         let mut node = SceneNode::new(self.scene.alloc_id(), name, kind);
         let id = node.id;
-        node.transform = Affine2::from_translation(min);
+        // Линия позиционируется от точки старта (a), а не от min: иначе при
+        // перетаскивании в отрицательном направлении она смещалась бы на (min - a).
+        node.transform = Affine2::from_translation(if tool == Tool::Line { a } else { min });
         node.fill = Some(Fill::solid(122, 170, 233, 255));
         node.stroke = Some(Stroke {
             color: [0, 0, 0, 200],

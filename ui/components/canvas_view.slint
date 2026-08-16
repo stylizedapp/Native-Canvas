@@ -1,13 +1,13 @@
 import { Theme } from "../theme.slint";
+import { Toolbar } from "toolbar.slint";
 
-// Центральная область: статус-бар сверху + viewport холста (Render-to-Texture).
-export component CanvasView {
+// Центральная Bento-карточка: viewport холста (Render-to-Texture) + плавающая
+// панель инструментов поверх него.
+export component CanvasView inherits Rectangle {
     in-out property <image> canvas-texture;
-    in-out property <string> zoom-text: "";
-    in-out property <string> fps-text: "";
-    in-out property <string> status-text: "";
     in-out property <bool> debug-show: false;
     in-out property <string> debug-text: "";
+    in-out property <string> active-tool: "select";
 
     // Фактический размер области холста (заполняется лейаутом).
     in-out property <float> canvas-width: canvas-area.width / 1px;
@@ -18,6 +18,7 @@ export component CanvasView {
     callback pointer-move(int, float, float);
     callback pointer-up(int, float, float);
     callback scroll(float, float, float);
+    callback tool-selected(string);
 
     changed canvas-width => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
     changed canvas-height => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
@@ -28,68 +29,67 @@ export component CanvasView {
         return 3;
     }
 
-    VerticalLayout {
-        spacing: 0px;
+    background: Theme.surface;
+    border-radius: Theme.radius-lg;
+    border-width: 1px;
+    border-color: Theme.border;
+    clip: true;
 
-        Rectangle {
-            height: 32px;
-            background: Theme.bg-topbar;
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                spacing: 16px;
-                Text { text: root.zoom-text; color: Theme.ok; font-weight: 700; vertical-alignment: center; }
-                Text { text: root.fps-text; color: Theme.ok; font-weight: 700; vertical-alignment: center; }
-                Text { text: root.status-text; color: Theme.text-dim; vertical-alignment: center; }
+    canvas-area := Rectangle {
+        background: Theme.canvas-bg;
+
+        Image {
+            width: 100%;
+            height: 100%;
+            source: root.canvas-texture;
+            image-fit: fill;
+            image-rendering: smooth;
+        }
+
+        TouchArea {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    root.pointer-down(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
+                } else if (event.kind == PointerEventKind.up) {
+                    root.pointer-up(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
+                }
+            }
+            moved => {
+                root.pointer-move(0, self.mouse-x / 1px, self.mouse-y / 1px);
+            }
+            scroll-event(event) => {
+                root.scroll(event.delta-y / 1px, self.mouse-x / 1px, self.mouse-y / 1px);
+                accept
             }
         }
 
-        canvas-area := Rectangle {
-            clip: true;
-            Image {
-                width: 100%;
-                height: 100%;
-                source: root.canvas-texture;
-                image-rendering: smooth;
-            }
-
-            TouchArea {
-                pointer-event(event) => {
-                    if (event.kind == PointerEventKind.down) {
-                        root.pointer-down(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
-                    } else if (event.kind == PointerEventKind.up) {
-                        root.pointer-up(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
-                    }
-                }
-                moved => {
-                    root.pointer-move(0, self.mouse-x / 1px, self.mouse-y / 1px);
-                }
-                scroll-event(event) => {
-                    root.scroll(event.delta-y / 1px, self.mouse-x / 1px, self.mouse-y / 1px);
-                    accept
-                }
-            }
-
-            // Оверлей дебагера
-            if root.debug-show : Rectangle {
-                x: 8px;
-                y: 8px;
-                width: 340px;
-                height: 220px;
-                background: Theme.debug-bg;
-                border-radius: 6px;
-                border-width: 1px;
-                border-color: Theme.border;
-                Text {
-                    text: root.debug-text;
-                    color: Theme.heading;
-                    font-family: "Consolas";
-                    font-size: 12px;
-                    x: 10px;
-                    y: 10px;
-                    wrap: word-wrap;
-                }
+        // Оверлей дебагера (ниже плавающей панели инструментов)
+        if root.debug-show : Rectangle {
+            x: Theme.space-2;
+            y: 60px;
+            width: 340px;
+            height: 220px;
+            background: #1c1c1cd8;
+            border-radius: Theme.radius-md;
+            border-width: 1px;
+            border-color: Theme.border;
+            Text {
+                text: root.debug-text;
+                color: Theme.text;
+                font-family: "Consolas";
+                font-size: Theme.font-xs;
+                x: 10px;
+                y: 10px;
+                wrap: word-wrap;
             }
         }
+    }
+
+    // Плавающая панель инструментов: по центру сверху, поверх холста.
+    Toolbar {
+        x: (root.width - 376px) / 2;
+        y: Theme.space-2;
+        active-tool: root.active-tool;
+        tool-selected(t) => { root.tool-selected(t); }
     }
 }

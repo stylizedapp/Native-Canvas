@@ -1,30 +1,22 @@
-use super::scene::{NodeKind, Scene, SceneNode, NodeId, PAGE_SIZE};
-use super::transform::Camera;
+use super::{
+    rects_intersect, world_bbox, Renderer, CANVAS_BG, GRID, ORIGIN, PAGE_BG, PAGE_BORDER,
+    PREVIEW_FILL, PREVIEW_STROKE, SELECTION,
+};
+use super::super::grid::GridConfig;
+use super::super::scene::{NodeKind, Scene, SceneNode, NodeId, PAGE_SIZE};
+use super::super::transform::Camera;
 use crate::engine::controller::Preview;
 use glam::{Affine2, Vec2};
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, PixmapMut, Rect, Stroke as SkStroke, Transform};
 
-/// Абстракция графического бэкенда. Сейчас — CPU (tiny-skia); в будущем можно
-/// реализовать на GPU (vello / wgpu) без изменения ядра и UI.
-pub trait Renderer {
-    /// Рендерит сцену в переданный RGBA8-буфер (без аллокаций на кадр).
-    fn render(
-        &mut self,
-        scene: &Scene,
-        camera: &Camera,
-        width: u32,
-        height: u32,
-        selected: &[NodeId],
-        grid_visible: bool,
-        preview: Option<Preview>,
-        out: &mut [u8],
-    );
-}
-
-/// Бэкенд на tiny-skia (CPU-растеризация).
+/// Бэкенд на tiny-skia (CPU-растеризация) — фолбэк, когда GPU недоступен.
 pub struct TinySkiaRenderer;
 
 impl Renderer for TinySkiaRenderer {
+    fn name(&self) -> &'static str {
+        "tiny-skia (CPU)"
+    }
+
     fn render(
         &mut self,
         scene: &Scene,
@@ -32,13 +24,13 @@ impl Renderer for TinySkiaRenderer {
         width: u32,
         height: u32,
         selected: &[NodeId],
-        grid_visible: bool,
+        grid: GridConfig,
         preview: Option<Preview>,
         out: &mut [u8],
-    ) {
+    ) -> bool {
         let mut pixmap =
             PixmapMut::from_bytes(out, width, height).expect("pixmap");
-        pixmap.fill(Color::from_rgba8(30, 30, 30, 255));
+        pixmap.fill(Color::from_rgba8(CANVAS_BG[0], CANVAS_BG[1], CANVAS_BG[2], CANVAS_BG[3]));
 
         let cam = camera.to_affine();
         let cam_ts = Transform::from_row(
@@ -58,8 +50,8 @@ impl Renderer for TinySkiaRenderer {
         draw_page(&mut pixmap, cam_ts, camera, view_min, view_max);
 
         // Сетка — один draw-call, только видимая область.
-        if grid_visible {
-            draw_grid(&mut pixmap, cam_ts, camera, view_min, view_max, 8.0);
+        if grid.visible {
+            draw_grid(&mut pixmap, cam_ts, camera, view_min, view_max, grid.step);
         }
 
         // Однопроходный обход дерева с накопленной трансформацией (O(n)).
@@ -90,10 +82,14 @@ impl Renderer for TinySkiaRenderer {
             }
         }
 
+        // Маркер начала координат (0,0) — для визуальной проверки пана/зума.
+        draw_origin(&mut pixmap, cam_ts, camera.zoom);
+
         // Live-превью создаваемой фигуры.
         if let Some(p) = preview {
             draw_preview(&mut pixmap, cam_ts, p);
         }
+        true
     }
 }
 
@@ -105,7 +101,7 @@ fn draw_page(pixmap: &mut PixmapMut, cam_ts: Transform, camera: &Camera, view_mi
     let Some(rect) = Rect::from_xywh(0.0, 0.0, PAGE_SIZE.x, PAGE_SIZE.y) else { return };
 
     let mut fp = Paint::default();
-    fp.set_color_rgba8(0x20, 0x20, 0x20, 255);
+    fp.set_color_rgba8(PAGE_BG[0], PAGE_BG[1], PAGE_BG[2], PAGE_BG[3]);
     fp.anti_alias = false;
     pixmap.fill_rect(rect, &fp, cam_ts, None);
 
@@ -113,7 +109,7 @@ fn draw_page(pixmap: &mut PixmapMut, cam_ts: Transform, camera: &Camera, view_mi
     pb.push_rect(rect);
     let Some(path) = pb.finish() else { return };
     let mut sp = Paint::default();
-    sp.set_color_rgba8(0x5a, 0x5a, 0x5a, 255);
+    sp.set_color_rgba8(PAGE_BORDER[0], PAGE_BORDER[1], PAGE_BORDER[2], PAGE_BORDER[3]);
     sp.anti_alias = false;
     let sk = SkStroke { width: 1.0 / camera.zoom, ..Default::default() };
     pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
@@ -150,28 +146,10 @@ fn draw_grid(pixmap: &mut PixmapMut, cam_ts: Transform, camera: &Camera, view_mi
     let Some(path) = pb.finish() else { return };
 
     let mut sp = Paint::default();
-    sp.set_color_rgba8(0x3a, 0x3a, 0x3a, 255);
+    sp.set_color_rgba8(GRID[0], GRID[1], GRID[2], GRID[3]);
     sp.anti_alias = false;
     let sk = SkStroke { width: 1.0 / camera.zoom, ..Default::default() };
     pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
-}
-
-/// Мировая ограничивающая рамка по локальной геометрии и трансформации.
-fn world_bbox(kind: &NodeKind, world: Affine2) -> (Vec2, Vec2) {
-    let (lmin, lmax) = kind.local_bbox();
-    let corners = [
-        world.transform_point2(lmin),
-        world.transform_point2(Vec2::new(lmax.x, lmin.y)),
-        world.transform_point2(Vec2::new(lmin.x, lmax.y)),
-        world.transform_point2(lmax),
-    ];
-    let min = corners.iter().copied().reduce(Vec2::min).unwrap_or(lmin);
-    let max = corners.iter().copied().reduce(Vec2::max).unwrap_or(lmax);
-    (min, max)
-}
-
-fn rects_intersect(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
-    a0.x <= b1.x && a1.x >= b0.x && a0.y <= b1.y && a1.y >= b0.y
 }
 
 fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, pixmap: &mut PixmapMut) {
@@ -234,6 +212,32 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, pixmap: &mut P
     }
 }
 
+/// Маркер начала координат (0,0): крест + точка. Размер на экране постоянный
+/// (масштабируется на 1/zoom), поэтому при зуме остаётся читаемым.
+fn draw_origin(pixmap: &mut PixmapMut, cam_ts: Transform, zoom: f32) {
+    let w = 1.0 / zoom;
+
+    let mut pb = PathBuilder::new();
+    let arm = 6.0 * w;
+    pb.move_to(-arm, 0.0);
+    pb.line_to(arm, 0.0);
+    pb.move_to(0.0, -arm);
+    pb.line_to(0.0, arm);
+    if let Some(path) = pb.finish() {
+        let mut sp = Paint::default();
+        sp.set_color_rgba8(ORIGIN[0], ORIGIN[1], ORIGIN[2], ORIGIN[3]);
+        sp.anti_alias = true;
+        let sk = SkStroke { width: w, ..Default::default() };
+        pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
+    }
+
+    let Some(rect) = Rect::from_xywh(-2.5 * w, -2.5 * w, 5.0 * w, 5.0 * w) else { return };
+    let mut fp = Paint::default();
+    fp.set_color_rgba8(ORIGIN[0], ORIGIN[1], ORIGIN[2], ORIGIN[3]);
+    fp.anti_alias = true;
+    pixmap.fill_rect(rect, &fp, cam_ts, None);
+}
+
 fn draw_bbox_highlight(pixmap: &mut PixmapMut, cam_ts: Transform, mn: Vec2, mx: Vec2) {
     let w = (mx.x - mn.x).max(1.0);
     let h = (mx.y - mn.y).max(1.0);
@@ -243,7 +247,7 @@ fn draw_bbox_highlight(pixmap: &mut PixmapMut, cam_ts: Transform, mn: Vec2, mx: 
     }
     if let Some(path) = pb.finish() {
         let mut sp = Paint::default();
-        sp.set_color_rgba8(0, 122, 255, 255);
+        sp.set_color_rgba8(SELECTION[0], SELECTION[1], SELECTION[2], SELECTION[3]);
         sp.anti_alias = true;
         let sk = SkStroke { width: 1.5, ..Default::default() };
         pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
@@ -275,12 +279,12 @@ fn draw_preview(pixmap: &mut PixmapMut, cam_ts: Transform, p: Preview) {
     }
     if let Some(path) = pb.finish() {
         let mut fp = Paint::default();
-        fp.set_color_rgba8(0, 122, 255, 60);
+        fp.set_color_rgba8(PREVIEW_FILL[0], PREVIEW_FILL[1], PREVIEW_FILL[2], PREVIEW_FILL[3]);
         fp.anti_alias = true;
         pixmap.fill_path(&path, &fp, FillRule::Winding, cam_ts, None);
 
         let mut sp = Paint::default();
-        sp.set_color_rgba8(0, 162, 255, 255);
+        sp.set_color_rgba8(PREVIEW_STROKE[0], PREVIEW_STROKE[1], PREVIEW_STROKE[2], PREVIEW_STROKE[3]);
         sp.anti_alias = true;
         let sk = SkStroke { width: 1.0, ..Default::default() };
         pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);

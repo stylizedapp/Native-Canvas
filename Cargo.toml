@@ -10,6 +10,8 @@ slint = { version = "1.9", default-features = false, features = ["compat-1-2", "
 
 # 2D Rendering
 tiny-skia = "0.11"
+vello = "0.10" # GPU-рендер холста (wgpu); фолбэк на tiny-skia при отсутствии GPU
+pollster = "0.4" # Синхронное ожидание wgpu-фьючеров в render loop
 
 # Data Structures & Math
 slotmap = { version = "1.0", features = ["serde"] }

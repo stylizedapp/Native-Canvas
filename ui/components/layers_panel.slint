@@ -7,35 +7,25 @@ export struct LayerItem {
     depth: int,
 }
 
-// Дерево слоёв. Получает готовую модель из ядра; изменение стиля здесь
-// не затрагивает сцену.
-export component LayersPanel {
+// Дерево слоёв (список внутри Bento-карточки). Стиль — только здесь.
+export component LayersPanel inherits ListView {
     in-out property <[LayerItem]> layers;
     in-out property <int> selected-layer: -1;
 
     callback select-layer(int);
 
-    VerticalLayout {
-        padding: 8px;
-        spacing: 6px;
-
-        Text { text: "Layers"; color: Theme.heading; font-weight: 700; }
-
-        ListView {
-            for item in root.layers : Rectangle {
-                height: 24px;
-                width: 100%;
-                background: (root.selected-layer == item.id) ? Theme.accent : transparent;
-                TouchArea {
-                    clicked => { root.select-layer(item.id); }
-                    Text {
-                        text: item.name;
-                        color: Theme.text;
-                        font-size: 12px;
-                        vertical-alignment: center;
-                        x: 4px + (item.depth * 10px);
-                    }
-                }
+    for item in root.layers : Rectangle {
+        height: 28px;
+        border-radius: Theme.radius-sm;
+        background: root.selected-layer == item.id ? Theme.selection : (touch.pressed ? Theme.surface-raised : transparent);
+        touch := TouchArea {
+            clicked => { root.select-layer(item.id); }
+            Text {
+                text: item.name;
+                color: root.selected-layer == item.id ? Theme.text : Theme.text-muted;
+                font-size: Theme.font-sm;
+                vertical-alignment: center;
+                x: Theme.space-2 + (item.depth * 10px);
             }
         }
     }
