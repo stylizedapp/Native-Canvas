@@ -2,9 +2,13 @@
 //! колбэки инспектора и построитель дерева слоёв.
 
 use crate::engine::controller::CanvasController;
+use crate::engine::model::nodes::{NodeKey, NodeKind, ShapeKind};
+use crate::engine::model::scene::SceneNode;
+use crate::engine::model::types::Paint;
+use crate::engine::profiler::FrameProfiler;
 use crate::engine::renderers::Renderer;
-use crate::engine::scene::{NodeKind, SceneNode};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
+use slotmap::Key;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Instant;
@@ -37,7 +41,7 @@ pub struct CanvasState {
     pub frame_count: u64,
     pub last_render_us: u128,
     // Кэш UI (установка только при изменении).
-    pub last_sel_id: Option<u64>,
+    pub last_sel_id: Option<NodeKey>,
     pub last_zoom_text: String,
     pub last_fps_text: String,
     pub last_tool: String,
@@ -116,14 +120,15 @@ impl Default for CanvasState {
     }
 }
 
-/// Один тик цикла рендера: рендерит и обновляет UI каждый кадр,
-/// чтобы канвас/инспектор/статистика всегда отражали состояние.
-/// Пауза только когда окно свёрнуто или скрыто.
+/// Один тик on-demand цикла рендера: рендерит только если есть изменения
+/// (`dirty`) или изменился размер буфера. При чистом состоянии — мгновенный
+/// возврат без касания GPU/VRAM (сон). Пауза также когда окно свёрнуто/скрыто.
 pub fn sync(
     window: &slint::Weak<AppWindow>,
     controller: &Controller,
     renderer: &RendererRef,
     state: &Rc<RefCell<CanvasState>>,
+    profiler: &Rc<RefCell<FrameProfiler>>,
 ) {
     let Some(w) = window.upgrade() else { return };
 
@@ -146,13 +151,21 @@ pub fn sync(
 
     let mut c = controller.borrow_mut();
     let mut st = state.borrow_mut();
-    st.ensure(bw, bh);
+
+    // On-demand: ничего не менялось и размер прежний — рендер не нужен.
+    let size_changed = st.ensure(bw, bh);
+    if !c.dirty && !size_changed {
+        return;
+    }
+
+    // Пересчёт кэшированных мировых трансформаций (хит-тест, рамки выделения).
+    c.scene.flush_transforms();
 
     // Рендер прямо в переиспользуемый буфер (не тот, что отдан окну).
     let render_cam = c.camera.for_render_scale(scale);
     let next = st.cur ^ 1;
     let t0 = Instant::now();
-    let submitted = {
+    let outcome = {
         let (rw, rh) = (st.w, st.h);
         let bytes = st.images[next].make_mut_bytes();
         renderer.borrow_mut().render(
@@ -160,16 +173,21 @@ pub fn sync(
             &render_cam,
             rw,
             rh,
-            &c.scene.selection,
+            c.scene.selection(),
             c.grid,
             c.preview.clone(),
             bytes,
         )
     };
+    let mut metrics = outcome.metrics;
+    metrics.total_us = t0.elapsed().as_micros();
+    profiler.borrow_mut().record(metrics);
+
     // Кадр принят бэкендом — сбрасываем dirty. Если GPU пропустил кадр,
-    // оставляем dirty, чтобы дорисовать в следующий тик.
+    // оставляем dirty, чтобы дорисовать в следующий тик (сторож 200ms).
+    let submitted = outcome.submitted;
     c.dirty = !submitted;
-    st.last_render_us = t0.elapsed().as_micros();
+    st.last_render_us = metrics.total_us;
     st.frame_count += 1;
 
     // FPS (раз в секунду).
@@ -214,7 +232,7 @@ pub fn sync(
         let model: ModelRc<LayerItem> = Rc::new(VecModel::from(items)).into();
         w.set_layers(model);
     }
-    w.set_selected_layer(c.scene.selection.first().map(|&i| i as i32).unwrap_or(-1));
+    w.set_selected_layer(c.scene.selection().first().map(|&k| k.data().as_ffi() as i32).unwrap_or(-1));
 
     // Инспектор: диф по значениям каждый кадр (живые правки при драге).
     // При смене узла сбрасываем кэш и cooldown — все поля обновятся принудительно.
@@ -249,7 +267,7 @@ pub fn sync(
              Backend: {}",
             st.fps,
             st.last_render_us as f64 / 1000.0,
-            c.scene.nodes.len(),
+            c.scene.len(),
             bw,
             bh,
             scale * 100.0,
@@ -277,19 +295,23 @@ pub fn register_inspector_callbacks(
     window: &AppWindow,
     controller: &Controller,
     state: &Rc<RefCell<CanvasState>>,
+    render: &Rc<dyn Fn()>,
 ) {
     let c = controller.clone();
     let weak = window.as_weak();
     let st = state.clone();
+    let rr = Rc::clone(render);
     window.on_set_name(move |name| {
         mark_edited(&st, SelField::Name);
         c.borrow_mut().set_name(name.as_str());
         refresh_sel(&weak, &c);
+        rr();
     });
 
     let c = controller.clone();
     let weak = window.as_weak();
     let st = state.clone();
+    let rr = Rc::clone(render);
     window.on_set_x(move |v| {
         mark_edited(&st, SelField::X);
         if let Ok(x) = v.trim().parse::<f32>() {
@@ -297,11 +319,13 @@ pub fn register_inspector_callbacks(
             c.borrow_mut().set_position(x, y);
             refresh_sel(&weak, &c);
         }
+        rr();
     });
 
     let c = controller.clone();
     let weak = window.as_weak();
     let st = state.clone();
+    let rr = Rc::clone(render);
     window.on_set_y(move |v| {
         mark_edited(&st, SelField::Y);
         if let Ok(y) = v.trim().parse::<f32>() {
@@ -309,11 +333,13 @@ pub fn register_inspector_callbacks(
             c.borrow_mut().set_position(x, y);
             refresh_sel(&weak, &c);
         }
+        rr();
     });
 
     let c = controller.clone();
     let weak = window.as_weak();
     let st = state.clone();
+    let rr = Rc::clone(render);
     window.on_set_w(move |v| {
         mark_edited(&st, SelField::W);
         if let Ok(w) = v.trim().parse::<f32>() {
@@ -321,11 +347,13 @@ pub fn register_inspector_callbacks(
             c.borrow_mut().set_size(w, h);
             refresh_sel(&weak, &c);
         }
+        rr();
     });
 
     let c = controller.clone();
     let weak = window.as_weak();
     let st = state.clone();
+    let rr = Rc::clone(render);
     window.on_set_h(move |v| {
         mark_edited(&st, SelField::H);
         if let Ok(h) = v.trim().parse::<f32>() {
@@ -333,34 +361,39 @@ pub fn register_inspector_callbacks(
             c.borrow_mut().set_size(w, h);
             refresh_sel(&weak, &c);
         }
+        rr();
     });
 
     let c = controller.clone();
     let weak = window.as_weak();
     let st = state.clone();
+    let rr = Rc::clone(render);
     window.on_set_opacity(move |v| {
         mark_edited(&st, SelField::Opacity);
         if let Ok(o) = v.trim().parse::<f32>() {
             c.borrow_mut().set_opacity(o / 100.0);
             refresh_sel(&weak, &c);
         }
+        rr();
     });
 
     let c = controller.clone();
     let weak = window.as_weak();
     let st = state.clone();
+    let rr = Rc::clone(render);
     window.on_set_fill(move |v| {
         mark_edited(&st, SelField::Fill);
         c.borrow_mut().set_fill_hex(v.as_str());
         refresh_sel(&weak, &c);
+        rr();
     });
 }
 
 fn current_x(c: &Controller) -> f32 {
-    c.borrow().selected().map(|n| n.transform.translation.x).unwrap_or(0.0)
+    c.borrow().selected().map(|n| n.local_transform.translation.x).unwrap_or(0.0)
 }
 fn current_y(c: &Controller) -> f32 {
-    c.borrow().selected().map(|n| n.transform.translation.y).unwrap_or(0.0)
+    c.borrow().selected().map(|n| n.local_transform.translation.y).unwrap_or(0.0)
 }
 fn current_w(c: &Controller) -> f32 {
     c.borrow().selected().map(|n| dims(&n.kind).0).unwrap_or(0.0)
@@ -370,8 +403,10 @@ fn current_h(c: &Controller) -> f32 {
 }
 
 fn dims(kind: &NodeKind) -> (f32, f32) {
-    match *kind {
-        NodeKind::Frame { w, h } | NodeKind::Rectangle { w, h } | NodeKind::Ellipse { w, h } => (w, h),
+    match kind {
+        NodeKind::Frame { size, .. } => (size.x, size.y),
+        NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => (size.x, size.y),
+        NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => (radii.x, radii.y),
         _ => (0.0, 0.0),
     }
 }
@@ -420,30 +455,37 @@ fn upd_field(
 fn update_sel(w: &AppWindow, n: &SceneNode, st: &mut CanvasState) {
     let now = Instant::now();
     upd_field(w, &mut st.last_sel_name, &mut st.sel_edited_at[SelField::Name as usize], now, n.name.clone(), AppWindow::set_sel_name);
-    upd_field(w, &mut st.last_sel_x, &mut st.sel_edited_at[SelField::X as usize], now, fmt_num(n.transform.translation.x), AppWindow::set_sel_x_text);
-    upd_field(w, &mut st.last_sel_y, &mut st.sel_edited_at[SelField::Y as usize], now, fmt_num(n.transform.translation.y), AppWindow::set_sel_y_text);
+    upd_field(w, &mut st.last_sel_x, &mut st.sel_edited_at[SelField::X as usize], now, fmt_num(n.local_transform.translation.x), AppWindow::set_sel_x_text);
+    upd_field(w, &mut st.last_sel_y, &mut st.sel_edited_at[SelField::Y as usize], now, fmt_num(n.local_transform.translation.y), AppWindow::set_sel_y_text);
     let (dw, dh) = dims(&n.kind);
     upd_field(w, &mut st.last_sel_w, &mut st.sel_edited_at[SelField::W as usize], now, fmt_num(dw), AppWindow::set_sel_w_text);
     upd_field(w, &mut st.last_sel_h, &mut st.sel_edited_at[SelField::H as usize], now, fmt_num(dh), AppWindow::set_sel_h_text);
     upd_field(w, &mut st.last_sel_opacity, &mut st.sel_edited_at[SelField::Opacity as usize], now, fmt_pct(n.opacity), AppWindow::set_sel_opacity_text);
-    let fill = n
-        .fill
-        .map(|f| format!("#{:02X}{:02X}{:02X}", f.color[0], f.color[1], f.color[2]))
-        .unwrap_or_else(|| "#000000".into());
-    upd_field(w, &mut st.last_sel_fill, &mut st.sel_edited_at[SelField::Fill as usize], now, fill, AppWindow::set_sel_fill);
+    upd_field(w, &mut st.last_sel_fill, &mut st.sel_edited_at[SelField::Fill as usize], now, sel_fill_hex(n), AppWindow::set_sel_fill);
 }
 
 /// Заполняет поля инспектора из узла.
 fn set_sel_texts(w: &AppWindow, n: &SceneNode) {
     w.set_sel_name(n.name.clone().into());
-    w.set_sel_x_text(fmt_num(n.transform.translation.x).into());
-    w.set_sel_y_text(fmt_num(n.transform.translation.y).into());
+    w.set_sel_x_text(fmt_num(n.local_transform.translation.x).into());
+    w.set_sel_y_text(fmt_num(n.local_transform.translation.y).into());
     let (dw, dh) = dims(&n.kind);
     w.set_sel_w_text(fmt_num(dw).into());
     w.set_sel_h_text(fmt_num(dh).into());
     w.set_sel_opacity_text(fmt_pct(n.opacity).into());
-    let (r, g, b) = n.fill.map(|f| (f.color[0], f.color[1], f.color[2])).unwrap_or((0, 0, 0));
-    w.set_sel_fill(format!("#{:02X}{:02X}{:02X}", r, g, b).into());
+    w.set_sel_fill(sel_fill_hex(n).into());
+}
+
+/// HEX-строка первой сплошной заливки узла ("#RRGGBB").
+fn sel_fill_hex(n: &SceneNode) -> String {
+    n.fills
+        .iter()
+        .find_map(|p| match p {
+            Paint::Solid(c) => Some(c.to_rgba8()),
+            _ => None,
+        })
+        .map(|c| format!("#{:02X}{:02X}{:02X}", c[0], c[1], c[2]))
+        .unwrap_or_else(|| "#000000".into())
 }
 
 /// Обновляет поля после commit (значения нормализованы контроллером).
@@ -457,11 +499,11 @@ fn refresh_sel(win: &slint::Weak<AppWindow>, c: &Controller) {
 
 pub fn build_layers(c: &CanvasController) -> Vec<LayerItem> {
     let mut out = Vec::new();
-    let mut stack: Vec<(u64, i32)> = c.scene.roots.iter().rev().map(|&id| (id, 0)).collect();
-    while let Some((id, depth)) = stack.pop() {
-        if let Some(node) = c.scene.get(id) {
+    let mut stack: Vec<(NodeKey, i32)> = c.scene.roots().iter().rev().map(|&k| (k, 0)).collect();
+    while let Some((key, depth)) = stack.pop() {
+        if let Some(node) = c.scene.get(key) {
             out.push(LayerItem {
-                id: id as i32,
+                id: key.data().as_ffi() as i32,
                 name: node.name.clone().into(),
                 depth,
             });

@@ -1,12 +1,16 @@
 use super::{
-    rects_intersect, world_bbox, Renderer, CANVAS_BG, GRID, ORIGIN, PAGE_BG, PAGE_BORDER,
-    PREVIEW_FILL, PREVIEW_STROKE, SELECTION,
+    rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, GRID, ORIGIN, PAGE_BG,
+    PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
 };
 use super::super::grid::GridConfig;
-use super::super::scene::{NodeKind, Scene, SceneNode, NodeId, PAGE_SIZE};
+use super::super::model::nodes::{NodeKey, NodeKind, ShapeKind};
+use super::super::model::scene::{SceneGraph, SceneNode};
+use super::super::model::types::Paint as ModelPaint;
+use super::super::profiler::FrameMetrics;
 use super::super::transform::Camera;
 use crate::engine::controller::Preview;
 use glam::{Affine2, Vec2};
+use std::time::Instant;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, PixmapMut, Rect, Stroke as SkStroke, Transform};
 
 /// Бэкенд на tiny-skia (CPU-растеризация) — фолбэк, когда GPU недоступен.
@@ -19,15 +23,16 @@ impl Renderer for TinySkiaRenderer {
 
     fn render(
         &mut self,
-        scene: &Scene,
+        scene: &SceneGraph,
         camera: &Camera,
         width: u32,
         height: u32,
-        selected: &[NodeId],
+        selected: &[NodeKey],
         grid: GridConfig,
         preview: Option<Preview>,
         out: &mut [u8],
-    ) -> bool {
+    ) -> RenderOutcome {
+        let t0 = Instant::now();
         let mut pixmap =
             PixmapMut::from_bytes(out, width, height).expect("pixmap");
         pixmap.fill(Color::from_rgba8(CANVAS_BG[0], CANVAS_BG[1], CANVAS_BG[2], CANVAS_BG[3]));
@@ -55,19 +60,19 @@ impl Renderer for TinySkiaRenderer {
         }
 
         // Однопроходный обход дерева с накопленной трансформацией (O(n)).
-        let mut stack: Vec<(NodeId, Affine2)> = scene
-            .roots
+        let mut stack: Vec<(NodeKey, Affine2)> = scene
+            .roots()
             .iter()
             .rev()
-            .map(|&id| (id, Affine2::IDENTITY))
+            .map(|&key| (key, Affine2::IDENTITY))
             .collect();
 
-        while let Some((id, acc)) = stack.pop() {
-            let Some(node) = scene.get(id) else { continue };
-            if !node.visible {
+        while let Some((key, acc)) = stack.pop() {
+            let Some(node) = scene.get(key) else { continue };
+            if !node.is_visible {
                 continue;
             }
-            let world = acc * node.transform;
+            let world = acc * node.local_transform;
             let (mn, mx) = world_bbox(&node.kind, world);
             if rects_intersect(mn, mx, view_min, view_max) {
                 draw_node(node, world, cam_ts, &mut pixmap);
@@ -76,8 +81,8 @@ impl Renderer for TinySkiaRenderer {
         }
 
         // Подсветка выделенных узлов (обводка ограничивающей рамки).
-        for id in selected {
-            if let Some((mn, mx)) = scene.world_bbox(*id) {
+        for key in selected {
+            if let Some((mn, mx)) = scene.world_bbox(*key) {
                 draw_bbox_highlight(&mut pixmap, cam_ts, mn, mx);
             }
         }
@@ -89,7 +94,13 @@ impl Renderer for TinySkiaRenderer {
         if let Some(p) = preview {
             draw_preview(&mut pixmap, cam_ts, p);
         }
-        true
+
+        // CPU-бэкенд: весь кадр — построение сцены; GPU-стадий нет.
+        let us = t0.elapsed().as_micros();
+        RenderOutcome {
+            submitted: true,
+            metrics: FrameMetrics { scene_build_us: us, gpu_encode_us: 0, gpu_readback_us: 0, total_us: us },
+        }
     }
 }
 
@@ -163,53 +174,64 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, pixmap: &mut P
     ));
 
     let mut pb = PathBuilder::new();
-    match node.kind {
-        NodeKind::Frame { w, h } | NodeKind::Rectangle { w, h } => {
-            if let Some(rect) = Rect::from_xywh(0.0, 0.0, w, h) {
+    match &node.kind {
+        NodeKind::Frame { size, .. } | NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => {
+            if let Some(rect) = Rect::from_xywh(0.0, 0.0, size.x, size.y) {
                 pb.push_rect(rect);
             }
         }
-        NodeKind::Ellipse { w, h } => {
-            if let Some(rect) = Rect::from_xywh(0.0, 0.0, w, h) {
+        NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => {
+            if let Some(rect) = Rect::from_xywh(0.0, 0.0, radii.x, radii.y) {
                 pb.push_oval(rect);
             }
         }
-        NodeKind::Line { x2, y2 } => {
-            pb.move_to(0.0, 0.0);
-            pb.line_to(x2, y2);
+        NodeKind::Shape(ShapeKind::Line { start, end }) => {
+            pb.move_to(start.x, start.y);
+            pb.line_to(end.x, end.y);
         }
-        NodeKind::Group | NodeKind::Vector => return,
+        _ => return,
     }
 
     let Some(path) = pb.finish() else { return };
 
-    // Заливка.
-    if let Some(f) = node.fill {
+    // Заливка (первая сплошная; градиенты пока игнорируются).
+    if let Some(f) = solid_fill(node) {
         if node.opacity > 0.0 {
-            let a = (f.color[3] as f32 * node.opacity).round() as u8;
+            let a = (f[3] as f32 * node.opacity).round() as u8;
             let mut paint = Paint::default();
-            paint.set_color_rgba8(f.color[0], f.color[1], f.color[2], a);
+            paint.set_color_rgba8(f[0], f[1], f[2], a);
             paint.anti_alias = true;
             pixmap.fill_path(&path, &paint, FillRule::Winding, combined, None);
         }
     }
     // Обводка.
-    if let Some(st) = node.stroke {
+    if let Some(st) = node.strokes.first() {
         if st.width > 0.0 {
-            let scale = world.matrix2.x_axis.length().max(world.matrix2.y_axis.length());
-            let mut sp = Paint::default();
-            sp.set_color_rgba8(st.color[0], st.color[1], st.color[2], st.color[3]);
-            sp.anti_alias = true;
-            let sk = SkStroke {
-                width: st.width * scale,
-                miter_limit: 4.0,
-                line_cap: tiny_skia::LineCap::Round,
-                line_join: tiny_skia::LineJoin::Round,
-                dash: None,
-            };
-            pixmap.stroke_path(&path, &sp, &sk, combined, None);
+            if let ModelPaint::Solid(c) = &st.paint {
+                let sc8 = c.to_rgba8();
+                let scale = world.matrix2.x_axis.length().max(world.matrix2.y_axis.length());
+                let mut sp = Paint::default();
+                sp.set_color_rgba8(sc8[0], sc8[1], sc8[2], sc8[3]);
+                sp.anti_alias = true;
+                let sk = SkStroke {
+                    width: st.width * scale,
+                    miter_limit: 4.0,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    dash: None,
+                };
+                pixmap.stroke_path(&path, &sp, &sk, combined, None);
+            }
         }
     }
+}
+
+/// Первая сплошная заливка узла в виде RGBA8.
+fn solid_fill(node: &SceneNode) -> Option<[u8; 4]> {
+    node.fills.iter().find_map(|p| match p {
+        ModelPaint::Solid(c) => Some(c.to_rgba8()),
+        _ => None,
+    })
 }
 
 /// Маркер начала координат (0,0): крест + точка. Размер на экране постоянный
@@ -260,18 +282,18 @@ fn draw_preview(pixmap: &mut PixmapMut, cam_ts: Transform, p: Preview) {
     let size = max - min;
 
     let mut pb = PathBuilder::new();
-    match p.kind {
-        NodeKind::Rectangle { .. } | NodeKind::Frame { .. } => {
+    match &p.kind {
+        NodeKind::Frame { .. } | NodeKind::Shape(ShapeKind::Rectangle { .. }) => {
             if let Some(rect) = Rect::from_xywh(min.x, min.y, size.x, size.y) {
                 pb.push_rect(rect);
             }
         }
-        NodeKind::Ellipse { .. } => {
+        NodeKind::Shape(ShapeKind::Ellipse { .. }) => {
             if let Some(rect) = Rect::from_xywh(min.x, min.y, size.x, size.y) {
                 pb.push_oval(rect);
             }
         }
-        NodeKind::Line { .. } => {
+        NodeKind::Shape(ShapeKind::Line { .. }) => {
             pb.move_to(p.a.x, p.a.y);
             pb.line_to(p.b.x, p.b.y);
         }

@@ -58,6 +58,7 @@ export component AppWindow inherits Window {
     callback toggle-debug();
     callback set-grid-step(string);
     callback reset-view();
+    callback canvas-resized();
     // Инспектор
     callback set-name(string);
     callback set-x(string);
@@ -109,6 +110,7 @@ export component AppWindow inherits Window {
                 canvas-size-changed(w, h) => {
                     root.canvas-width = w;
                     root.canvas-height = h;
+                    root.canvas-resized();
                 }
                 pointer-down(b, x, y) => { root.pointer-down(b, x, y); }
                 pointer-move(b, x, y) => { root.pointer-move(b, x, y); }

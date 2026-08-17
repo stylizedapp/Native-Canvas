@@ -1,14 +1,18 @@
 ﻿use super::{
-    rects_intersect, world_bbox, Renderer, CANVAS_BG, GRID, ORIGIN, PAGE_BG, PAGE_BORDER,
-    PREVIEW_FILL, PREVIEW_STROKE, SELECTION,
+    rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, GRID, ORIGIN, PAGE_BG,
+    PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
 };
 use super::super::grid::GridConfig;
-use super::super::scene::{NodeKind, Scene, SceneNode, NodeId, PAGE_SIZE};
+use super::super::model::nodes::{NodeKey, NodeKind, ShapeKind};
+use super::super::model::scene::{SceneGraph, SceneNode};
+use super::super::model::types::Paint as ModelPaint;
+use super::super::profiler::FrameMetrics;
 use super::super::transform::Camera;
 use crate::engine::controller::Preview;
 use glam::{Affine2, Vec2};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use vello::kurbo::{self, Cap, Join, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 use vello::wgpu;
@@ -35,6 +39,8 @@ pub struct VelloRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     renderer: VelloCore,
+    /// Переиспользуемый буфер сцены: `reset()` вместо аллокации каждый кадр.
+    scene: VelloScene,
     target: Option<(u32, u32, wgpu::Texture)>,
     staging: [Option<StagingSlot>; 2],
     /// Хотя бы раз показали кадр (буфер не пустой мусор).
@@ -78,6 +84,7 @@ impl VelloRenderer {
             device,
             queue,
             renderer,
+            scene: VelloScene::new(),
             target: None,
             staging: [None, None],
             has_image: false,
@@ -149,19 +156,25 @@ impl Renderer for VelloRenderer {
 
     fn render(
         &mut self,
-        scene: &Scene,
+        scene: &SceneGraph,
         camera: &Camera,
         width: u32,
         height: u32,
-        selected: &[NodeId],
+        selected: &[NodeKey],
         grid: GridConfig,
         preview: Option<Preview>,
         out: &mut [u8],
-    ) -> bool {
-        let bg = CANVAS_BG;
-        let mut vs = VelloScene::new();
+    ) -> RenderOutcome {
+        let t_total = Instant::now();
+        let mut metrics = FrameMetrics::default();
 
-        let cam_affine = camera.to_affine();
+        let bg = CANVAS_BG;
+        let t_build = Instant::now();
+        self.scene.reset();
+        {
+            let mut vs = &mut self.scene;
+
+            let cam_affine = camera.to_affine();
         let cam_t = to_affine(cam_affine);
         let zoom = camera.zoom;
 
@@ -204,18 +217,18 @@ impl Renderer for VelloRenderer {
         }
 
         // Однопроходный обход дерева с накопленной трансформацией (O(n)).
-        let mut stack: Vec<(NodeId, Affine2)> = scene
-            .roots
+        let mut stack: Vec<(NodeKey, Affine2)> = scene
+            .roots()
             .iter()
             .rev()
-            .map(|&id| (id, Affine2::IDENTITY))
+            .map(|&key| (key, Affine2::IDENTITY))
             .collect();
-        while let Some((id, acc)) = stack.pop() {
-            let Some(node) = scene.get(id) else { continue };
-            if !node.visible {
+        while let Some((key, acc)) = stack.pop() {
+            let Some(node) = scene.get(key) else { continue };
+            if !node.is_visible {
                 continue;
             }
-            let world = acc * node.transform;
+            let world = acc * node.local_transform;
             let (mn, mx) = world_bbox(&node.kind, world);
             if rects_intersect(mn, mx, view_min, view_max) {
                 let screen = to_affine(cam_affine * world);
@@ -225,8 +238,8 @@ impl Renderer for VelloRenderer {
         }
 
         // Подсветка выделенных узлов.
-        for id in selected {
-            if let Some((mn, mx)) = scene.world_bbox(*id) {
+        for key in selected {
+            if let Some((mn, mx)) = scene.world_bbox(*key) {
                 let rect = kurbo::Rect::new(mn.x as f64, mn.y as f64, mx.x as f64, mx.y as f64);
                 stroke_shape(&mut vs, cam_t, rgba8(SELECTION, 1.0), (1.5 / zoom) as f64, &rect);
             }
@@ -239,10 +252,14 @@ impl Renderer for VelloRenderer {
         if let Some(p) = preview {
             draw_preview(&mut vs, cam_t, &p, (1.0 / zoom) as f64);
         }
+        } // конец заимствования self.scene: дальше работаем только с GPU-ресурсами
+
+        metrics.scene_build_us = t_build.elapsed().as_micros();
 
         // --- Неблокирующий пайплайн: собрать готовый кадр, отправить новый ---
 
         // Запускает отложенные колбэки map_async (без ожидания GPU).
+        let t_readback = Instant::now();
         let _ = self.device.poll(wgpu::PollType::Poll);
         self.reset_staging(width, height);
 
@@ -266,6 +283,7 @@ impl Renderer for VelloRenderer {
             }
             self.has_image = true;
         }
+        metrics.gpu_readback_us = t_readback.elapsed().as_micros();
 
         // Свободный слот под новый кадр; если свободного нет — GPU не успевает,
         // кадр пропускаем (состояние останется грязным, дорисуем в следующий тик).
@@ -277,10 +295,12 @@ impl Renderer for VelloRenderer {
                 None => true,
             })
         else {
-            return false;
+            metrics.total_us = t_total.elapsed().as_micros();
+            return RenderOutcome { submitted: false, metrics };
         };
 
         // Рендер в текстуру (сабмит без ожидания) + readback-копия.
+        let t_encode = Instant::now();
         let target = self.ensure_target(width, height);
         let view = target.create_view(&wgpu::TextureViewDescriptor {
             label: Some("vello-canvas-view"),
@@ -296,7 +316,7 @@ impl Renderer for VelloRenderer {
         if let Err(e) = self.renderer.render_to_texture(
             &self.device,
             &self.queue,
-            &vs,
+            &self.scene,
             &view,
             &RenderParams {
                 base_color: Color::from_rgb8(bg[0], bg[1], bg[2]),
@@ -306,7 +326,7 @@ impl Renderer for VelloRenderer {
             },
         ) {
             eprintln!("vello render error: {e}");
-            return false;
+            return RenderOutcome { submitted: false, metrics };
         }
 
         if self.staging[idx].is_none() {
@@ -350,8 +370,10 @@ impl Renderer for VelloRenderer {
             flag.store(true, Ordering::Relaxed);
         });
         slot.in_flight = true;
+        metrics.gpu_encode_us = t_encode.elapsed().as_micros();
+        metrics.total_us = t_total.elapsed().as_micros();
 
-        true
+        RenderOutcome { submitted: true, metrics }
     }
 }
 
@@ -408,47 +430,61 @@ fn draw_origin(scene: &mut VelloScene, cam_t: kurbo::Affine, w: f64) {
     fill_shape(scene, cam_t, color, &dot);
 }
 
+/// Первая сплошная заливка узла в виде RGBA8 (градиенты пока игнорируются).
+fn solid_fill(node: &SceneNode) -> Option<[u8; 4]> {
+    node.fills.iter().find_map(|p| match p {
+        ModelPaint::Solid(c) => Some(c.to_rgba8()),
+        _ => None,
+    })
+}
+
+/// Заливает и обводит прямоугольник/эллипс (общий путь для Frame/Rect).
+fn draw_filled(
+    scene: &mut VelloScene,
+    node: &SceneNode,
+    screen: kurbo::Affine,
+    shape: &impl kurbo::Shape,
+) {
+    if let Some(f) = solid_fill(node) {
+        if node.opacity > 0.0 {
+            fill_shape(scene, screen, rgba8(f, node.opacity), shape);
+        }
+    }
+    if let Some(st) = node.strokes.first() {
+        if st.width > 0.0 {
+            if let ModelPaint::Solid(c) = &st.paint {
+                stroke_shape(scene, screen, rgba8(c.to_rgba8(), 1.0), st.width as f64, shape);
+            }
+        }
+    }
+}
+
 fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
-    match node.kind {
-        NodeKind::Frame { w, h } | NodeKind::Rectangle { w, h } => {
-            let rect = kurbo::Rect::new(0.0, 0.0, w as f64, h as f64);
-            if let Some(f) = node.fill {
-                if node.opacity > 0.0 {
-                    fill_shape(scene, screen, rgba8(f.color, node.opacity), &rect);
-                }
-            }
-            if let Some(st) = node.stroke {
+    match &node.kind {
+        NodeKind::Frame { size, .. } | NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => {
+            let rect = kurbo::Rect::new(0.0, 0.0, size.x as f64, size.y as f64);
+            draw_filled(scene, node, screen, &rect);
+        }
+        NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => {
+            let rx = radii.x as f64 / 2.0;
+            let ry = radii.y as f64 / 2.0;
+            let ell = kurbo::Ellipse::new((rx, ry), (rx, ry), 0.0);
+            draw_filled(scene, node, screen, &ell);
+        }
+        NodeKind::Shape(ShapeKind::Line { start, end }) => {
+            if let Some(st) = node.strokes.first() {
                 if st.width > 0.0 {
-                    stroke_shape(scene, screen, rgba8(st.color, 1.0), st.width as f64, &rect);
+                    if let ModelPaint::Solid(c) = &st.paint {
+                        let line = kurbo::Line::new(
+                            (start.x as f64, start.y as f64),
+                            (end.x as f64, end.y as f64),
+                        );
+                        stroke_shape(scene, screen, rgba8(c.to_rgba8(), 1.0), st.width as f64, &line);
+                    }
                 }
             }
         }
-        NodeKind::Ellipse { w, h } => {
-            let ell = kurbo::Ellipse::new(
-                (w as f64 / 2.0, h as f64 / 2.0),
-                (w as f64 / 2.0, h as f64 / 2.0),
-                0.0,
-            );
-            if let Some(f) = node.fill {
-                if node.opacity > 0.0 {
-                    fill_shape(scene, screen, rgba8(f.color, node.opacity), &ell);
-                }
-            }
-            if let Some(st) = node.stroke {
-                if st.width > 0.0 {
-                    stroke_shape(scene, screen, rgba8(st.color, 1.0), st.width as f64, &ell);
-                }
-            }
-        }
-        NodeKind::Line { x2, y2 } => {
-            if let Some(st) = node.stroke {
-                if st.width > 0.0 {
-                    let line = kurbo::Line::new((0.0, 0.0), (x2 as f64, y2 as f64));
-                    stroke_shape(scene, screen, rgba8(st.color, 1.0), st.width as f64, &line);
-                }
-            }
-        }
-        NodeKind::Group | NodeKind::Vector => {}
+        _ => {}
     }
 }
 
@@ -458,13 +494,13 @@ fn draw_preview(scene: &mut VelloScene, cam_t: kurbo::Affine, p: &Preview, w: f6
     let size = max - min;
     let fill = rgba8(PREVIEW_FILL, 1.0);
     let stroke = rgba8(PREVIEW_STROKE, 1.0);
-    match p.kind {
-        NodeKind::Rectangle { .. } | NodeKind::Frame { .. } => {
+    match &p.kind {
+        NodeKind::Frame { .. } | NodeKind::Shape(ShapeKind::Rectangle { .. }) => {
             let rect = kurbo::Rect::new(min.x as f64, min.y as f64, max.x as f64, max.y as f64);
             fill_shape(scene, cam_t, fill, &rect);
             stroke_shape(scene, cam_t, stroke, w, &rect);
         }
-        NodeKind::Ellipse { .. } => {
+        NodeKind::Shape(ShapeKind::Ellipse { .. }) => {
             let ell = kurbo::Ellipse::new(
                 ((min.x + size.x / 2.0) as f64, (min.y + size.y / 2.0) as f64),
                 ((size.x / 2.0) as f64, (size.y / 2.0) as f64),
@@ -473,7 +509,7 @@ fn draw_preview(scene: &mut VelloScene, cam_t: kurbo::Affine, p: &Preview, w: f6
             fill_shape(scene, cam_t, fill, &ell);
             stroke_shape(scene, cam_t, stroke, w, &ell);
         }
-        NodeKind::Line { .. } => {
+        NodeKind::Shape(ShapeKind::Line { .. }) => {
             let line = kurbo::Line::new((p.a.x as f64, p.a.y as f64), (p.b.x as f64, p.b.y as f64));
             stroke_shape(scene, cam_t, stroke, w, &line);
         }

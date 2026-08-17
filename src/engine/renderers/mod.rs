@@ -1,5 +1,7 @@
 use super::grid::GridConfig;
-use super::scene::{NodeKind, NodeId, Scene};
+use super::model::nodes::{NodeKey, NodeKind};
+use super::model::scene::SceneGraph;
+use super::profiler::FrameMetrics;
 use super::transform::Camera;
 use crate::engine::controller::Preview;
 use glam::{Affine2, Vec2};
@@ -9,6 +11,10 @@ mod vello;
 
 pub use tiny_skia::TinySkiaRenderer;
 pub use vello::VelloRenderer;
+
+/// Размер страницы/холста (границы области рисования), в мировых координатах.
+/// f32-точности достаточно: на 20000 точность ~0.002px.
+pub const PAGE_SIZE: Vec2 = Vec2::new(20000.0, 20000.0);
 
 /// Палитра канваса. Эти цвета дублируются в `ui/theme.slint` (`Theme.canvas-bg`
 /// и т.д.) — при смене стиля правьте оба места (см. `ui/STYLING.md`).
@@ -22,6 +28,15 @@ pub const PREVIEW_STROKE: [u8; 4] = [0x6e, 0x9a, 0xff, 0xff];
 /// Маркер начала координат (0,0) — для визуальной проверки пана/зума.
 pub const ORIGIN: [u8; 4] = [0xff, 0x9f, 0x43, 0xff];
 
+/// Результат кадра рендера: был ли принят GPU + постадийные метрики.
+pub struct RenderOutcome {
+    /// `true` — кадр принят (отправлен на растеризацию), можно сбросить dirty.
+    /// `false` — GPU пропустил кадр (не успел): состояние остаётся грязным.
+    pub submitted: bool,
+    /// Метрики стадий (заполняются бэкендом; `total_us` — вызывающим).
+    pub metrics: FrameMetrics,
+}
+
 /// Абстракция графического бэкенда. Сейчас — CPU (tiny-skia) и GPU (vello/wgpu).
 /// Ядро и UI не знают о конкретном бэкенде.
 pub trait Renderer {
@@ -30,21 +45,22 @@ pub trait Renderer {
 
     /// Рендерит сцену в переданный RGBA8-буфер.
     ///
-    /// Возвращает `true`, если кадр был принят (отправлен на растеризацию) —
-    /// тогда вызывающий может сбросить dirty-флаг. GPU-бэкенд может временно
-    /// пропустить кадр, если GPU не успевает (тогда вернётся `false` и состояние
-    /// останется грязным для следующего тика).
+    /// Сцена передаётся только для чтения: мировые трансформации уже
+    /// пересчитаны вызывающим (`SceneGraph::flush_transforms`).
+    ///
+    /// Возвращает [`RenderOutcome`]: `submitted` — принят ли кадр бэкендом,
+    /// `metrics` — постадийные замеры для профилировщика.
     fn render(
         &mut self,
-        scene: &Scene,
+        scene: &SceneGraph,
         camera: &Camera,
         width: u32,
         height: u32,
-        selected: &[NodeId],
+        selected: &[NodeKey],
         grid: GridConfig,
         preview: Option<Preview>,
         out: &mut [u8],
-    ) -> bool;
+    ) -> RenderOutcome;
 }
 
 /// Создаёт бэкенд: пробует GPU (vello), при неудаче — CPU (tiny-skia).

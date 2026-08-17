@@ -1,6 +1,9 @@
 use super::grid::GridConfig;
 use super::history::History;
-use super::scene::{Fill, NodeKind, NodeId, Scene, SceneNode, Stroke};
+use super::model::document::Document;
+use super::model::nodes::{NodeKey, NodeKind, ShapeKind};
+use super::model::scene::{SceneGraph, SceneNode};
+use super::model::types::{Color, Constraints, Paint, Stroke};
 use super::tool::Tool;
 use super::transform::{pick, Camera};
 use crate::engine::serialize::{load_json, save_json};
@@ -20,7 +23,7 @@ struct Drag {
     anchor_screen: Vec2,
     current_screen: Vec2,
     /// Захваченный узел при перемещении (Select tool).
-    grabbed: Option<NodeId>,
+    grabbed: Option<NodeKey>,
     /// Последняя мировая позиция курсора (для корректного перемещения).
     last_world: Vec2,
     /// Мировая позиция курсора в момент захвата (Select tool).
@@ -31,7 +34,7 @@ struct Drag {
 
 /// Контроллер холста: связывает граф сцены, камеру, инструменты и историю.
 pub struct CanvasController {
-    pub scene: Scene,
+    pub scene: SceneGraph,
     pub camera: Camera,
     history: History,
     pub tool: Tool,
@@ -48,7 +51,7 @@ pub struct CanvasController {
 impl CanvasController {
     pub fn new() -> Self {
         let mut c = Self {
-            scene: Scene::new(),
+            scene: SceneGraph::new(),
             camera: Camera::new(),
             history: History::new(100),
             tool: Tool::Select,
@@ -79,7 +82,7 @@ impl CanvasController {
     pub fn undo(&mut self) {
         if let Some(prev) = self.history.undo(&self.scene) {
             self.scene = prev;
-            self.scene.selection.clear();
+            self.scene.clear_selection();
             self.bump_revision();
         }
     }
@@ -87,7 +90,7 @@ impl CanvasController {
     pub fn redo(&mut self) {
         if let Some(next) = self.history.redo(&self.scene) {
             self.scene = next;
-            self.scene.selection.clear();
+            self.scene.clear_selection();
             self.bump_revision();
         }
     }
@@ -136,7 +139,7 @@ impl CanvasController {
     }
 
     /// Создаёт корневой узел по инструменту из прямоугольника (anchor..current).
-    fn add_root_node(&mut self, tool: Tool, a: Vec2, b: Vec2) -> NodeId {
+    fn add_root_node(&mut self, tool: Tool, a: Vec2, b: Vec2) -> NodeKey {
         let name = match tool {
             Tool::Rectangle => "Rectangle",
             Tool::Ellipse => "Ellipse",
@@ -149,47 +152,57 @@ impl CanvasController {
         let size = max - min;
 
         let kind = match tool {
-            Tool::Rectangle => NodeKind::Rectangle { w: size.x, h: size.y },
-            Tool::Ellipse => NodeKind::Ellipse { w: size.x, h: size.y },
-            Tool::Line => NodeKind::Line { x2: b.x - a.x, y2: b.y - a.y },
-            Tool::Frame => NodeKind::Frame { w: size.x, h: size.y },
-            _ => return 0,
+            Tool::Rectangle => {
+                NodeKind::Shape(ShapeKind::Rectangle { size, corner_radii: [0.0; 4] })
+            }
+            Tool::Ellipse => NodeKind::Shape(ShapeKind::Ellipse {
+                radii: size,
+                start_angle: 0.0,
+                end_angle: std::f32::consts::TAU,
+                inner_radius_ratio: 0.0,
+            }),
+            // Линия локально идёт из (0,0) в (b-a); трансляция в `a`.
+            Tool::Line => {
+                NodeKind::Shape(ShapeKind::Line { start: Vec2::ZERO, end: b - a })
+            }
+            Tool::Frame => NodeKind::Frame {
+                size,
+                clip_content: false,
+                corner_radii: [0.0; 4],
+                auto_layout: None,
+                constraints: Constraints::default(),
+            },
+            _ => return NodeKey::default(),
         };
 
-        let mut node = SceneNode::new(self.scene.alloc_id(), name, kind);
-        let id = node.id;
-        // Линия позиционируется от точки старта (a), а не от min: иначе при
-        // перетаскивании в отрицательном направлении она смещалась бы на (min - a).
-        node.transform = Affine2::from_translation(if tool == Tool::Line { a } else { min });
-        node.fill = Some(Fill::solid(122, 170, 233, 255));
-        node.stroke = Some(Stroke {
-            color: [0, 0, 0, 200],
-            width: 1.0,
-            inside: false,
-            center: true,
-            outside: false,
-        });
-        self.scene.add_root(node);
+        let key = self.scene.insert_root(name, kind);
+        if let Some(n) = self.scene.get_mut(key) {
+            // Линия позиционируется от точки старта (a), а не от min: иначе при
+            // перетаскивании в отрицательном направлении она смещалась бы на (min - a).
+            n.local_transform = Affine2::from_translation(if tool == Tool::Line { a } else { min });
+            n.fills = vec![Paint::Solid(Color::from_rgba8(122, 170, 233, 255))];
+            n.strokes = vec![Stroke::solid(Color::from_rgba8(0, 0, 0, 200), 1.0)];
+        }
         self.bump_revision();
-        id
+        key
     }
 
     pub fn delete_selection(&mut self) {
-        if self.scene.selection.is_empty() {
+        if self.scene.selection().is_empty() {
             return;
         }
         self.record();
-        let sel = self.scene.selection.clone();
-        for id in sel {
-            self.scene.remove(id);
+        let sel = self.scene.selection().to_vec();
+        for key in sel {
+            self.scene.remove(key);
         }
         self.bump_revision();
     }
 
-    /// Выбирает узел по id (из дерева слоёв).
-    pub fn select(&mut self, id: NodeId) {
-        if self.scene.get(id).is_some() {
-            self.scene.selection = vec![id];
+    /// Выбирает узел по ключу (из дерева слоёв).
+    pub fn select(&mut self, id: NodeKey) {
+        if self.scene.contains(id) {
+            self.scene.set_selection(vec![id]);
             self.bump_revision();
         }
     }
@@ -197,7 +210,7 @@ impl CanvasController {
     /// Сбрасывает документ (новый пустой файл).
     pub fn clear(&mut self) {
         self.record();
-        self.scene = Scene::new();
+        self.scene = SceneGraph::new();
         self.bump_revision();
     }
 
@@ -222,22 +235,22 @@ impl CanvasController {
         match self.tool {
             Tool::Select => {
                 let world = self.camera.screen_to_world(screen);
-                match pick(&self.scene, world) {
-                    Some(id) => {
+                match pick(&mut self.scene, world) {
+                    Some(key) => {
                         // Захват для перемещения.
                         self.record();
                         let start_pos = self
                             .scene
-                            .get(id)
-                            .map(|n| n.transform.translation)
+                            .get(key)
+                            .map(|n| n.local_transform.translation)
                             .unwrap_or(Vec2::ZERO);
-                        self.scene.selection.clear();
-                        self.scene.selection.push(id);
+                        self.scene.clear_selection();
+                        self.scene.add_to_selection(key);
                         self.drag = Some(Drag {
                             tool: Tool::Select,
                             anchor_screen: screen,
                             current_screen: screen,
-                            grabbed: Some(id),
+                            grabbed: Some(key),
                             last_world: world,
                             grab_world: world,
                             start_pos,
@@ -245,7 +258,7 @@ impl CanvasController {
                         self.bump_revision();
                     }
                     None => {
-                        self.scene.selection.clear();
+                        self.scene.clear_selection();
                         self.drag = None;
                         self.bump_revision();
                     }
@@ -279,14 +292,12 @@ impl CanvasController {
                 self.dirty = true;
             }
             Tool::Select => {
-                if let Some(id) = d.grabbed {
+                if let Some(key) = d.grabbed {
                     let world = self.camera.screen_to_world(screen);
                     d.last_world = world;
                     // Снап к итоговой позиции: без дрейфа, т.к. база — start_pos.
                     let target = self.snap_point(d.start_pos + (world - d.grab_world));
-                    if let Some(n) = self.scene.get_mut(id) {
-                        n.transform = Affine2::from_translation(target);
-                    }
+                    self.scene.set_transform(key, Affine2::from_translation(target));
                     self.dirty = true;
                 }
             }
@@ -316,8 +327,8 @@ impl CanvasController {
                 let screen_dist = (d.current_screen - d.anchor_screen).length();
                 if screen_dist >= 3.0 {
                     self.record();
-                    let id = self.add_root_node(d.tool, a, b);
-                    self.scene.selection = vec![id];
+                    let key = self.add_root_node(d.tool, a, b);
+                    self.scene.set_selection(vec![key]);
                 }
             }
             Tool::Select | Tool::Pan => {}
@@ -335,12 +346,12 @@ impl CanvasController {
 
     // --- Свойства выделенного узла ---
 
-    pub fn selected_id(&self) -> Option<NodeId> {
-        self.scene.selection.first().copied()
+    pub fn selected_id(&self) -> Option<NodeKey> {
+        self.scene.selection().first().copied()
     }
 
     pub fn selected(&self) -> Option<&SceneNode> {
-        self.selected_id().and_then(|id| self.scene.get(id))
+        self.selected_id().and_then(|key| self.scene.get(key))
     }
 
     fn mutate_selected(&mut self, f: impl FnOnce(&mut SceneNode)) {
@@ -349,24 +360,29 @@ impl CanvasController {
         if let Some(n) = self.scene.get_mut(id) {
             f(n);
         }
+        // Прямое изменение может затронуть геометрию/трансформацию — инвалидируем.
+        self.scene.mark_subtree_dirty(id);
         self.dirty = true;
     }
 
     pub fn set_position(&mut self, x: f32, y: f32) {
         let snapped = self.snap_point(Vec2::new(x, y));
         self.mutate_selected(|n| {
-            n.transform = Affine2::from_translation(snapped);
+            n.local_transform = Affine2::from_translation(snapped);
         });
     }
 
     pub fn set_size(&mut self, w: f32, h: f32) {
         let snapped = self.snap_size(Vec2::new(w.max(1.0), h.max(1.0)));
         self.mutate_selected(|n| match &mut n.kind {
-            NodeKind::Frame { w: nw, h: nh }
-            | NodeKind::Rectangle { w: nw, h: nh }
-            | NodeKind::Ellipse { w: nw, h: nh } => {
-                *nw = snapped.x;
-                *nh = snapped.y;
+            NodeKind::Frame { size, .. } => {
+                *size = snapped;
+            }
+            NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => {
+                *size = snapped;
+            }
+            NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => {
+                *radii = snapped;
             }
             _ => {}
         });
@@ -383,20 +399,29 @@ impl CanvasController {
 
     pub fn set_fill_hex(&mut self, hex: &str) {
         if let Some(rgb) = parse_hex(hex) {
-            self.mutate_selected(|n| n.fill = Some(Fill { color: [rgb[0], rgb[1], rgb[2], 255] }));
+            self.mutate_selected(|n| {
+                n.fills = vec![Paint::Solid(Color::from_rgba8(rgb[0], rgb[1], rgb[2], 255))];
+            });
         }
     }
 
     // --- Сериализация ---
 
     pub fn save(&self) -> Result<String, String> {
-        save_json(&self.scene).map_err(|e| e.to_string())
+        // Сцена — основной контент; страницы/стили пока дефолтные.
+        let mut doc = Document::new();
+        let roots = self.scene.roots().to_vec();
+        if let Some(page) = doc.active_page_mut() {
+            page.top_level = roots;
+        }
+        doc.scene = self.scene.clone();
+        save_json(&doc).map_err(|e| e.to_string())
     }
 
     pub fn load(&mut self, data: &str) -> Result<(), String> {
-        let scene = load_json(data).map_err(|e| e.to_string())?;
+        let doc = load_json(data).map_err(|e| e.to_string())?;
         self.record();
-        self.scene = scene;
+        self.scene = doc.scene;
         self.bump_revision();
         Ok(())
     }
@@ -404,11 +429,24 @@ impl CanvasController {
 
 fn kind_for_tool(tool: Tool) -> NodeKind {
     match tool {
-        Tool::Rectangle => NodeKind::Rectangle { w: 1.0, h: 1.0 },
-        Tool::Ellipse => NodeKind::Ellipse { w: 1.0, h: 1.0 },
-        Tool::Line => NodeKind::Line { x2: 1.0, y2: 1.0 },
-        Tool::Frame => NodeKind::Frame { w: 1.0, h: 1.0 },
-        _ => NodeKind::Rectangle { w: 1.0, h: 1.0 },
+        Tool::Rectangle => {
+            NodeKind::Shape(ShapeKind::Rectangle { size: Vec2::ONE, corner_radii: [0.0; 4] })
+        }
+        Tool::Ellipse => NodeKind::Shape(ShapeKind::Ellipse {
+            radii: Vec2::ONE,
+            start_angle: 0.0,
+            end_angle: std::f32::consts::TAU,
+            inner_radius_ratio: 0.0,
+        }),
+        Tool::Line => NodeKind::Shape(ShapeKind::Line { start: Vec2::ZERO, end: Vec2::ONE }),
+        Tool::Frame => NodeKind::Frame {
+            size: Vec2::ONE,
+            clip_content: false,
+            corner_radii: [0.0; 4],
+            auto_layout: None,
+            constraints: Constraints::default(),
+        },
+        _ => NodeKind::Shape(ShapeKind::Rectangle { size: Vec2::ONE, corner_radii: [0.0; 4] }),
     }
 }
 

@@ -8,6 +8,8 @@ export struct LayerItem {
 }
 
 // Дерево слоёв (список внутри Bento-карточки). Стиль — только здесь.
+// id — индекс слота NodeKey (младшие 32 бита as_ffi); список пересобирается
+// на каждую ревизию, поэтому потеря version-бита безопасна.
 export component LayersPanel inherits ListView {
     in-out property <[LayerItem]> layers;
     in-out property <int> selected-layer: -1;

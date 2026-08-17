@@ -1,4 +1,5 @@
-use crate::engine::scene::{Scene, NodeKind, NodeId};
+use crate::engine::model::nodes::{NodeKey, NodeKind, ShapeKind};
+use crate::engine::model::scene::SceneGraph;
 use glam::{Affine2, Vec2};
 
 /// Камера холста: панорамирование и масштабирование.
@@ -56,24 +57,26 @@ impl Default for Camera {
 /// Поиск узла под точкой в мировых координатах.
 /// Сначала — быстрый отбор по AABB (снизу вверх по порядку отрисовки),
 /// затем — точная проверка по контуру примитива.
-pub fn pick(scene: &Scene, world: Vec2) -> Option<NodeId> {
-    let mut best: Option<(f32, NodeId)> = None;
-    for id in scene.walk().into_iter().rev() {
-        let node = scene.get(id)?;
-        if !node.visible {
+pub fn pick(scene: &mut SceneGraph, world: Vec2) -> Option<NodeKey> {
+    // Хит-тест читает кэшированные мировые трансформации.
+    scene.flush_transforms();
+    let mut best: Option<(f32, NodeKey)> = None;
+    for key in scene.walk().into_iter().rev() {
+        let node = scene.get(key)?;
+        if !node.is_visible {
             continue;
         }
-        let Some(bbox) = scene.world_bbox(id) else { continue };
-        if point_in_bbox(world, bbox.0, bbox.1) && precise_hit(scene, id, world) {
+        let Some(bbox) = scene.world_bbox(key) else { continue };
+        if point_in_bbox(world, bbox.0, bbox.1) && precise_hit(scene, key, world) {
             // Считаем площадь как приоритет: меньшие объекты поверх.
             let (mn, mx) = bbox;
             let area = (mx.x - mn.x) * (mx.y - mn.y);
             if best.map(|(a, _)| area < a).unwrap_or(true) {
-                best = Some((area, id));
+                best = Some((area, key));
             }
         }
     }
-    best.map(|(_, id)| id)
+    best.map(|(_, key)| key)
 }
 
 fn point_in_bbox(p: Vec2, min: Vec2, max: Vec2) -> bool {
@@ -83,56 +86,48 @@ fn point_in_bbox(p: Vec2, min: Vec2, max: Vec2) -> bool {
 /// Точная проверка попадания. Для вертикального среза используем AABB самого
 /// примитива (уже трансформированного); контурная проверка (ray-casting / Безье)
 /// будет добавлена на этапе Vector Networks.
-fn precise_hit(scene: &Scene, id: NodeId, world: Vec2) -> bool {
-    let node = scene.get(id);
-    match node {
-        Some(n) => match n.kind {
-            NodeKind::Rectangle { .. } | NodeKind::Frame { .. } => {
-                if let Some((mn, mx)) = scene.world_bbox(id) {
-                    point_in_bbox(world, mn, mx)
-                } else {
-                    false
-                }
-            }
-            NodeKind::Ellipse { .. } => {
-                // Эллипс: проверка по эллиптическому уравнению в локальных координатах.
-                hit_ellipse(scene, id, world)
-            }
-            NodeKind::Line { x2, y2 } => hit_line(scene, id, world, x2, y2),
-            NodeKind::Group => false,
-            NodeKind::Vector => false,
-        },
-        None => false,
+fn precise_hit(scene: &SceneGraph, key: NodeKey, world: Vec2) -> bool {
+    let node = match scene.get(key) {
+        Some(n) => n,
+        None => return false,
+    };
+    match &node.kind {
+        NodeKind::Frame { .. } | NodeKind::Shape(ShapeKind::Rectangle { .. }) => {
+            scene.world_bbox(key).map(|(mn, mx)| point_in_bbox(world, mn, mx)).unwrap_or(false)
+        }
+        NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => hit_ellipse(scene, key, world, *radii),
+        NodeKind::Shape(ShapeKind::Line { start, end }) => hit_line(scene, key, world, *start, *end),
+        _ => false,
     }
 }
 
-fn hit_ellipse(scene: &Scene, id: NodeId, world: Vec2) -> bool {
-    let Some(node) = scene.get(id) else { return false };
-    let NodeKind::Ellipse { w, h } = node.kind else { return false };
-    if w <= 0.0 || h <= 0.0 {
+fn hit_ellipse(scene: &SceneGraph, key: NodeKey, world: Vec2, size: Vec2) -> bool {
+    if size.x <= 0.0 || size.y <= 0.0 {
         return false;
     }
+    let Some(t) = scene.world_transform(key) else { return false };
     // Локальные координаты.
-    let t = scene.world_transform(id).inverse();
-    let local = t.transform_point2(world);
-    let cx = w / 2.0;
-    let cy = h / 2.0;
-    let dx = (local.x - cx) / (w / 2.0);
-    let dy = (local.y - cy) / (h / 2.0);
+    let local = t.inverse().transform_point2(world);
+    let cx = size.x / 2.0;
+    let cy = size.y / 2.0;
+    let dx = (local.x - cx) / (size.x / 2.0);
+    let dy = (local.y - cy) / (size.y / 2.0);
     dx * dx + dy * dy <= 1.0
 }
 
-fn hit_line(scene: &Scene, id: NodeId, world: Vec2, x2: f32, y2: f32) -> bool {
-    let Some(node) = scene.get(id) else { return false };
+fn hit_line(scene: &SceneGraph, key: NodeKey, world: Vec2, start: Vec2, end: Vec2) -> bool {
+    let Some(t) = scene.world_transform(key) else { return false };
     // Переводим точку в локальные координаты линии (она учитывает transform).
-    let local = scene.world_transform(id).inverse().transform_point2(world);
-    let a = Vec2::ZERO;
-    let b = Vec2::new(x2, y2);
+    let local = t.inverse().transform_point2(world);
     // Проверка на дистанцию от точки до отрезка.
-    let ab = b - a;
+    let ab = end - start;
     let ab2 = ab.length_squared();
-    let t = if ab2 == 0.0 { 0.0 } else { ((local - a).dot(ab) / ab2).clamp(0.0, 1.0) };
-    let closest = a + ab * t;
-    let tolerance = node.stroke.map(|s| (s.width / 2.0) + 4.0).unwrap_or(4.0);
+    let t_param = if ab2 == 0.0 { 0.0 } else { ((local - start).dot(ab) / ab2).clamp(0.0, 1.0) };
+    let closest = start + ab * t_param;
+    let tolerance = scene
+        .get(key)
+        .and_then(|n| n.strokes.first())
+        .map(|s| (s.width / 2.0) + 4.0)
+        .unwrap_or(4.0);
     (local - closest).length() <= tolerance
 }

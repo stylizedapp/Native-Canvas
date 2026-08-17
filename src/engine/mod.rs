@@ -1,4 +1,3 @@
-pub mod scene;
 pub mod model;
 pub mod transform;
 pub mod grid;
@@ -7,3 +6,4 @@ pub mod renderers;
 pub mod history;
 pub mod controller;
 pub mod serialize;
+pub mod profiler;
