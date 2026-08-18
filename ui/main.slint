@@ -3,6 +3,12 @@ import { BentoColumn, BentoGrid, Panel, SectionHeader, ActionButton, NumberField
 import { LayerItem, LayersPanel } from "components/layers_panel.slint";
 import { Inspector } from "components/inspector.slint";
 import { CanvasView } from "components/canvas_view.slint";
+import { CommandPalette, PaletteCommand } from "components/command_palette.slint";
+import { ShortcutsPanel, ShortcutRow } from "components/shortcuts.slint";
+import { AppMenu } from "components/app_menu.slint";
+import { SettingsPanel, ShortcutEditRow } from "components/settings.slint";
+import { ColorPicker } from "components/color_picker.slint";
+import { ContextMenu, ContextMenuEntry } from "components/context_menu.slint";
 
 // Корневой компонент: Bento-воркспейс. Сцена (Rust) общается с UI только
 // через типизированные свойства и колбэки (см. AppWindow).
@@ -18,7 +24,6 @@ export component AppWindow inherits Window {
     in-out property <string> status-text: "Ready";
     in-out property <string> tool: "select";
     in-out property <[LayerItem]> layers;
-    in-out property <int> selected-layer: -1;
     // Дебагер
     in-out property <bool> debug-show: false;
     in-out property <string> debug-text: "";
@@ -32,13 +37,78 @@ export component AppWindow inherits Window {
 
     // Инспектор выделенного узла (тексты полей — строки, управляются из Rust).
     in-out property <bool> has-selection: false;
-    in-out property <string> sel-name: "";
     in-out property <string> sel-x-text: "";
     in-out property <string> sel-y-text: "";
     in-out property <string> sel-w-text: "";
     in-out property <string> sel-h-text: "";
+    in-out property <string> sel-rot-text: "";
     in-out property <string> sel-opacity-text: "";
     in-out property <string> sel-fill: "";
+    in-out property <color> sel-fill-preview: #00000000;
+    in-out property <string> sel-stroke: "";
+    in-out property <color> sel-stroke-preview: #00000000;
+    in-out property <bool> sel-stroke-dash: false;
+    in-out property <string> sel-stroke-width-text: "";
+    in-out property <string> sel-corner-tl-text: "";
+    in-out property <string> sel-corner-tr-text: "";
+    in-out property <string> sel-corner-br-text: "";
+    in-out property <string> sel-corner-bl-text: "";
+    // Auto layout (Frame): есть ли выбранный фрейм, режим и параметры.
+    in-out property <bool> is-frame: false;
+    in-out property <int> layout-mode: 0;
+    in-out property <string> sel-layout-gap: "";
+    in-out property <string> sel-layout-padding: "";
+    // Направление пикера: заливка или обводка.
+    in-out property <bool> picker-stroke: false;
+    // Color picker: состояние цвета живёт в Rust, сюда — компоненты.
+    in-out property <bool> picker-open: false;
+    in-out property <int> picker-r: 0;
+    in-out property <int> picker-g: 0;
+    in-out property <int> picker-b: 0;
+    in-out property <int> picker-a: 255;
+    in-out property <string> picker-hex: "#00000000";
+    in-out property <float> picker-h: 0.0;
+    in-out property <float> picker-s: 0.0;
+    in-out property <float> picker-v: 0.0;
+    in-out property <color> picker-hue-color: #ff0000;
+    in-out property <color> picker-solid: #000000;
+    in-out property <color> picker-preview: #00000000;
+    in-out property <[color]> picker-swatches;
+    // Gizmo: имя хэндла под курсором (маппинг курсора в canvas_view.slint).
+    in-out property <string> hovered-handle: "";
+    // Плейсхолдер инспектора при мультивыделении (текст приходит из Rust).
+    in-out property <string> sel-hint: "";
+
+    // Command palette / справка по шорткатам.
+    in-out property <bool> palette-open: false;
+    in-out property <[PaletteCommand]> palette-commands;
+    in-out property <bool> help-open: false;
+    in-out property <[ShortcutRow]> shortcut-rows;
+
+    // Контекстное меню (ПКМ на канвасе / в слоях). Позиция — экранные
+    // координаты окна; записи собирает Rust по контексту (context-requested).
+    in-out property <bool> context-open: false;
+    in-out property <float> context-x: 0;
+    in-out property <float> context-y: 0;
+    in-out property <[ContextMenuEntry]> context-entries;
+    // Какой слой переименовывается инлайн-полем в Layers (-1 — никто).
+    in-out property <int> layer-rename-id: -1;
+
+    // Главное меню (☰) и диалог настроек.
+    in-out property <bool> menu-open: false;
+    in-out property <bool> settings-open: false;
+    // Тема: переключает глобал Theme (Rust ставит только theme-dark).
+    in-out property <bool> theme-dark: false;
+    in-out property <bool> settings-dark: self.theme-dark;
+    // Сетка/снап/шаг в диалоге зеркалят актуальное состояние (панель справа).
+    in-out property <bool> settings-grid: root.grid-on;
+    in-out property <bool> settings-snap: root.snap-on;
+    in-out property <string> settings-step: root.grid-step-text;
+    in-out property <[ShortcutEditRow]> shortcut-edit-rows;
+
+    changed theme-dark => {
+        Theme.dark = self.theme-dark;
+    }
 
     // Callbacks ядра
     callback tool-changed(string);
@@ -48,25 +118,91 @@ export component AppWindow inherits Window {
     callback new-doc();
     callback save-doc();
     callback open-doc();
-    callback pointer-down(int, float, float);
+    callback pointer-down(int, float, float, bool, bool);
     callback pointer-move(int, float, float);
     callback pointer-up(int, float, float);
     callback scroll(float, float, float);
-    callback select-layer(int);
+    callback key-release(string);
+    callback select-layer-mod(int, bool, bool);
+    callback drag-start(int);
+    callback drop-layer(int, float);
+    callback rename-layer(int, string);
     callback toggle-grid();
     callback toggle-snap();
     callback toggle-debug();
     callback set-grid-step(string);
     callback reset-view();
     callback canvas-resized();
-    // Инспектор
-    callback set-name(string);
-    callback set-x(string);
-    callback set-y(string);
-    callback set-w(string);
-    callback set-h(string);
-    callback set-opacity(string);
-    callback set-fill(string);
+    callback deselect();
+    callback zoom-in();
+    callback zoom-out();
+    callback toggle-palette();
+    callback toggle-help();
+    callback close-palette();
+    callback close-help();
+    callback palette-run(string);
+    callback palette-accept(string);
+    callback palette-filter-changed(string);
+    // Глобальные хоткеи: разрешение (Rust, раскладко-независимо) и выполнение.
+    callback shortcut(string, bool, bool, bool) -> string;
+    callback shortcut-run(string);
+    // Меню и настройки.
+    callback menu-item(string);
+    callback toggle-settings();
+    callback close-settings();
+    callback settings-set-dark(bool);
+    callback settings-set-grid(bool);
+    callback settings-set-snap(bool);
+    callback settings-set-step(string);
+    callback settings-set-shortcut(string, string);
+    callback settings-commit-shortcut(string, string);
+    callback reset-shortcuts();
+    // Инспектор (live — срабатывает на каждый ввод и на Enter)
+    callback live-x(string);
+    callback live-y(string);
+    callback live-w(string);
+    callback live-h(string);
+    callback live-rot(string);
+    callback live-opacity(string);
+    callback live-fill(string);
+    callback live-stroke(string);
+    callback live-stroke-width(string);
+    callback live-corner(int, string);
+    callback open-picker();
+    callback open-stroke-picker();
+    callback toggle-stroke-dash();
+    callback scrub-delta(int, float);
+    callback set-layout-mode(int);
+    callback live-layout-gap(string);
+    callback live-layout-padding(string);
+    callback scrub-layout-gap(float);
+    callback scrub-layout-padding(float);
+    // Color picker.
+    callback picker-hue(float);
+    callback picker-sv(float, float);
+    callback picker-alpha(float);
+    callback picker-hex-commit(string);
+    callback picker-rgba(int, string);
+    callback picker-hsl(int, string);
+    callback picker-swatch(int);
+    callback picker-done();
+    callback picker-cancel();
+    // Контекстное меню.
+    callback context-requested(float, float);
+    callback context-request-layer(int, float);
+    callback context-run(string);
+
+    init => { shortcut-scope.focus(); }
+    changed palette-open => {
+        if (!root.palette-open) {
+            shortcut-scope.focus();
+        }
+    }
+    changed picker-open => {
+        if (!root.picker-open) {
+            shortcut-scope.focus();
+        }
+    }
 
     VerticalLayout {
         padding: Theme.space-3;
@@ -76,20 +212,33 @@ export component AppWindow inherits Window {
             zoom: root.zoom-text;
             fps: root.fps-text;
             status: root.status-text;
+            menu-clicked() => { root.menu-open = !root.menu-open; }
         }
 
-        BentoGrid {
+        grid := BentoGrid {
             // ===== Левая колонка: слои + дебагер =====
-            BentoColumn {
+            col-layers := BentoColumn {
                 width: 232px;
 
-                Panel {
+                panel-layers := Panel {
                     SectionHeader { caption: "Layers"; }
-                    LayersPanel {
+                    layers := LayersPanel {
                         vertical-stretch: 1;
                         layers: root.layers;
-                        selected-layer: root.selected-layer;
-                        select-layer(id) => { root.select-layer(id); }
+                        editing-id: root.layer-rename-id;
+                        select-layer-mod(id, ctrl, shift) => {
+                            root.select-layer-mod(id, ctrl, shift);
+                        }
+                        drag-start(id) => { root.drag-start(id); }
+                        drop-layer(id, y) => { root.drop-layer(id, y); }
+                        rename-layer(id, t) => { root.rename-layer(id, t); }
+                        start-rename(id) => { root.layer-rename-id = id; }
+                        rename-done() => { root.layer-rename-id = -1; }
+                        context-menu(id, y) => {
+                            root.context-x = (grid.x + col-layers.x + panel-layers.x + layers.x) / 1px;
+                            root.context-y = (grid.y + col-layers.y + panel-layers.y + layers.y) / 1px + y;
+                            root.context-request-layer(id, y);
+                        }
                     }
                 }
 
@@ -100,23 +249,35 @@ export component AppWindow inherits Window {
             }
 
             // ===== Центр: viewport холста (инструменты плавают поверх) =====
-            CanvasView {
+            canvas := CanvasView {
                 horizontal-stretch: 1;
                 vertical-stretch: 1;
                 canvas-texture: root.canvas-texture;
                 debug-show: root.debug-show;
                 debug-text: root.debug-text;
                 active-tool: root.tool;
+                hovered-handle: root.hovered-handle;
                 canvas-size-changed(w, h) => {
                     root.canvas-width = w;
                     root.canvas-height = h;
                     root.canvas-resized();
                 }
-                pointer-down(b, x, y) => { root.pointer-down(b, x, y); }
+                pointer-down(b, x, y, ctrl, alt) => {
+                    shortcut-scope.focus();
+                    root.pointer-down(b, x, y, ctrl, alt);
+                }
                 pointer-move(b, x, y) => { root.pointer-move(b, x, y); }
                 pointer-up(b, x, y) => { root.pointer-up(b, x, y); }
                 scroll(d, x, y) => { root.scroll(d, x, y); }
-                tool-selected(t) => { root.tool-changed(t); }
+                tool-selected(t) => {
+                    shortcut-scope.focus();
+                    root.tool-changed(t);
+                }
+                context-menu(x, y) => {
+                    root.context-x = (grid.x + canvas.x) / 1px + x;
+                    root.context-y = (grid.y + canvas.y) / 1px + y;
+                    root.context-requested(x, y);
+                }
             }
 
             // ===== Правая колонка: инспектор + настройки =====
@@ -125,20 +286,46 @@ export component AppWindow inherits Window {
 
                 Inspector {
                     has-selection: root.has-selection;
-                    sel-name: root.sel-name;
+                    sel-hint: root.sel-hint;
                     sel-x-text: root.sel-x-text;
                     sel-y-text: root.sel-y-text;
                     sel-w-text: root.sel-w-text;
                     sel-h-text: root.sel-h-text;
+                    sel-rot-text: root.sel-rot-text;
                     sel-opacity-text: root.sel-opacity-text;
                     sel-fill: root.sel-fill;
-                    set-name(t) => { root.set-name(t); }
-                    set-x(t) => { root.set-x(t); }
-                    set-y(t) => { root.set-y(t); }
-                    set-w(t) => { root.set-w(t); }
-                    set-h(t) => { root.set-h(t); }
-                    set-opacity(t) => { root.set-opacity(t); }
-                    set-fill(t) => { root.set-fill(t); }
+                    sel-fill-preview: root.sel-fill-preview;
+                    sel-stroke: root.sel-stroke;
+                    sel-stroke-preview: root.sel-stroke-preview;
+                    sel-stroke-dash: root.sel-stroke-dash;
+                    sel-stroke-width-text: root.sel-stroke-width-text;
+                    sel-corner-tl-text: root.sel-corner-tl-text;
+                    sel-corner-tr-text: root.sel-corner-tr-text;
+                    sel-corner-br-text: root.sel-corner-br-text;
+                    sel-corner-bl-text: root.sel-corner-bl-text;
+                    is-frame: root.is-frame;
+                    layout-mode: root.layout-mode;
+                    sel-layout-gap: root.sel-layout-gap;
+                    sel-layout-padding: root.sel-layout-padding;
+                    live-x(t) => { root.live-x(t); }
+                    live-y(t) => { root.live-y(t); }
+                    live-w(t) => { root.live-w(t); }
+                    live-h(t) => { root.live-h(t); }
+                    live-rot(t) => { root.live-rot(t); }
+                    live-opacity(t) => { root.live-opacity(t); }
+                    live-fill(t) => { root.live-fill(t); }
+                    live-stroke(t) => { root.live-stroke(t); }
+                    live-stroke-width(t) => { root.live-stroke-width(t); }
+                    live-corner(i, t) => { root.live-corner(i, t); }
+                    open-picker() => { root.open-picker(); }
+                    open-stroke-picker() => { root.open-stroke-picker(); }
+                    toggle-stroke-dash() => { root.toggle-stroke-dash(); }
+                    scrub-delta(i, d) => { root.scrub-delta(i, d); }
+                    set-layout-mode(m) => { root.set-layout-mode(m); }
+                    live-layout-gap(t) => { root.live-layout-gap(t); }
+                    live-layout-padding(t) => { root.live-layout-padding(t); }
+                    scrub-layout-gap(d) => { root.scrub-layout-gap(d); }
+                    scrub-layout-padding(d) => { root.scrub-layout-padding(d); }
                 }
 
                 Panel {
@@ -160,6 +347,113 @@ export component AppWindow inherits Window {
                     }
                 }
             }
+        }
+    }
+
+    // ===== Глобальные хоткеи (фокус держит корневой FocusScope) =====
+    // Разрешение шортката унесено в Rust (см. src/engine/shortcuts.rs): там
+    // нормализация раскладки ЙЦУКЕН→QWERTY и таблица комбинаций. Здесь —
+    // только проброс события и запуск действия.
+    shortcut-scope := FocusScope {
+        focus-on-click: false;
+        enabled: true;
+
+        key-pressed(event) => {
+            let action = root.shortcut(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt);
+            if (action != "") {
+                root.shortcut-run(action);
+                accept
+            } else {
+                reject
+            }
+        }
+        key-released(event) => {
+            root.key-release(event.text);
+            reject
+        }
+    }
+
+    // ===== Command palette =====
+    CommandPalette {
+        open: root.palette-open;
+        commands: root.palette-commands;
+        close() => { root.close-palette(); }
+        run(title) => { root.palette-run(title); }
+        accept(filter) => { root.palette-accept(filter); }
+        filter-changed(f) => { root.palette-filter-changed(f); }
+    }
+
+    // ===== Справка по шорткатам =====
+    ShortcutsPanel {
+        open: root.help-open;
+        rows: root.shortcut-rows;
+        close() => { root.close-help(); }
+    }
+
+    // ===== Главное меню (☰) =====
+    AppMenu {
+        open: root.menu-open;
+        close() => { root.menu-open = false; }
+        item(a) => {
+            root.menu-open = false;
+            root.menu-item(a);
+        }
+    }
+
+    // ===== Диалог настроек =====
+    SettingsPanel {
+        open: root.settings-open;
+        dark: root.settings-dark;
+        grid: root.settings-grid;
+        snap: root.settings-snap;
+        step: root.settings-step;
+        shortcut-rows: root.shortcut-edit-rows;
+        close() => { root.close-settings(); }
+        set-dark(v) => { root.settings-set-dark(v); }
+        set-grid(v) => { root.settings-set-grid(v); }
+        set-snap(v) => { root.settings-set-snap(v); }
+        set-step(t) => { root.settings-set-step(t); }
+        set-shortcut(a, t) => { root.settings-set-shortcut(a, t); }
+        commit-shortcut(a, t) => { root.settings-commit-shortcut(a, t); }
+        reset-shortcuts() => { root.reset-shortcuts(); }
+    }
+
+    // ===== Полный color picker =====
+    ColorPicker {
+        open: root.picker-open;
+        r: root.picker-r;
+        g: root.picker-g;
+        b: root.picker-b;
+        a: root.picker-a;
+        hex: root.picker-hex;
+        h: root.picker-h;
+        s: root.picker-s;
+        v: root.picker-v;
+        hue-color: root.picker-hue-color;
+        solid: root.picker-solid;
+        preview: root.picker-preview;
+        swatches: root.picker-swatches;
+        hue-drag(h) => { root.picker-hue(h); }
+        sv-drag(s, v) => { root.picker-sv(s, v); }
+        alpha-drag(a) => { root.picker-alpha(a); }
+        hex-commit(t) => { root.picker-hex-commit(t); }
+        rgba-commit(field, t) => { root.picker-rgba(field, t); }
+        hsl-commit(field, t) => { root.picker-hsl(field, t); }
+        swatch-commit(i) => { root.picker-swatch(i); }
+        done() => { root.picker-done(); }
+        cancel() => { root.picker-cancel(); }
+    }
+
+    // ===== Контекстное меню (ПКМ) =====
+    ContextMenu {
+        open: root.context-open;
+        menu-x: root.context-x;
+        menu-y: root.context-y;
+        entries: root.context-entries;
+        close() => { root.context-open = false; }
+        action(id) => {
+            root.context-open = false;
+            root.context-run(id);
         }
     }
 }

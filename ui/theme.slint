@@ -1,27 +1,31 @@
 // Централизованная дизайн-система "Bento".
 // Все цвета/отступы/радиусы/шрифты — только здесь. Правка токенов = новый стиль.
+// Тема: `dark` переключает обе палитры (Obsidian и светлая Slate).
 export global Theme {
+    // --- Флаг темы (Dark / Light) ---
+    in-out property <bool> dark: false;
+
     // --- Surfaces ---
-    in-out property <brush> bg: #161618;
-    in-out property <brush> surface: #1f1f23;
-    in-out property <brush> surface-raised: #26262b;
-    in-out property <brush> border: #2e2e34;
-    in-out property <brush> border-strong: #3a3a42;
+    in-out property <brush> bg: self.dark ? #0d0e12 : #eef1f6;
+    in-out property <brush> surface: self.dark ? #161820 : #ffffff;
+    in-out property <brush> surface-raised: self.dark ? #202330 : #f6f7fb;
+    in-out property <brush> border: self.dark ? #2a2e3d : #d8dde7;
+    in-out property <brush> border-strong: self.dark ? #3f455c : #b6bdcd;
 
     // --- Text ---
-    in-out property <brush> text: #e8e8ea;
-    in-out property <brush> text-muted: #9a9aa2;
-    in-out property <brush> text-faint: #6a6a72;
+    in-out property <brush> text: self.dark ? #f7f9fc : #15171d;
+    in-out property <brush> text-muted: self.dark ? #8d95a8 : #4b5467;
+    in-out property <brush> text-faint: self.dark ? #52586b : #7c8498;
 
     // --- Accent / states ---
-    in-out property <brush> accent: #5b8cff;
-    in-out property <brush> accent-hover: #6e9aff;
-    in-out property <brush> accent-contrast: #0d0d0f;
-    in-out property <brush> selection: #2a3f66;
-    in-out property <brush> danger: #e5534b;
+    in-out property <brush> accent: #3b71fe;
+    in-out property <brush> accent-hover: #5685ff;
+    in-out property <brush> accent-contrast: #ffffff;
+    in-out property <brush> selection: self.dark ? #1a2d54 : #d5e0ff;
+    in-out property <brush> danger: #ff453a;
 
-    // --- Canvas (должен совпадать с base_color в Rust-рендере) ---
-    in-out property <brush> canvas-bg: #161618;
+    // --- Canvas ---
+    in-out property <brush> canvas-bg: self.dark ? #090a0d : #e4e8ef;
 
     // --- Spacing (4pt сетка) ---
     in-out property <length> space-0: 0px;

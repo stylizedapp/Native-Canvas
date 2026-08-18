@@ -8,17 +8,21 @@ export component CanvasView inherits Rectangle {
     in-out property <bool> debug-show: false;
     in-out property <string> debug-text: "";
     in-out property <string> active-tool: "select";
+    // Имя хэндла гизмо под курсором ("" — вне хэндлов); задаётся из Rust.
+    in property <string> hovered-handle: "";
 
     // Фактический размер области холста (заполняется лейаутом).
     in-out property <float> canvas-width: canvas-area.width / 1px;
     in-out property <float> canvas-height: canvas-area.height / 1px;
 
     callback canvas-size-changed(float, float);
-    callback pointer-down(int, float, float);
+    callback pointer-down(int, float, float, bool, bool);
     callback pointer-move(int, float, float);
     callback pointer-up(int, float, float);
     callback scroll(float, float, float);
     callback tool-selected(string);
+    // ПКМ отпущена: локальные координаты холста (контекстное меню открывается в Rust).
+    callback context-menu(float, float);
 
     changed canvas-width => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
     changed canvas-height => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
@@ -47,11 +51,24 @@ export component CanvasView inherits Rectangle {
         }
 
         TouchArea {
+            mouse-cursor: root.hovered-handle == "nw" ? nwse-resize :
+                root.hovered-handle == "se" ? nwse-resize :
+                root.hovered-handle == "ne" ? nesw-resize :
+                root.hovered-handle == "sw" ? nesw-resize :
+                root.hovered-handle == "n" ? ns-resize :
+                root.hovered-handle == "s" ? ns-resize :
+                root.hovered-handle == "e" ? ew-resize :
+                root.hovered-handle == "w" ? ew-resize :
+                default;
             pointer-event(event) => {
                 if (event.kind == PointerEventKind.down) {
-                    root.pointer-down(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
+                    root.pointer-down(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px, event.modifiers.control, event.modifiers.alt);
                 } else if (event.kind == PointerEventKind.up) {
-                    root.pointer-up(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
+                    if (event.button == PointerEventButton.right) {
+                        root.context-menu(self.mouse-x / 1px, self.mouse-y / 1px);
+                    } else {
+                        root.pointer-up(btn(event.button), self.mouse-x / 1px, self.mouse-y / 1px);
+                    }
                 }
             }
             moved => {
@@ -69,7 +86,7 @@ export component CanvasView inherits Rectangle {
             y: 60px;
             width: 340px;
             height: 220px;
-            background: #1c1c1cd8;
+            background: Theme.surface;
             border-radius: Theme.radius-md;
             border-width: 1px;
             border-color: Theme.border;

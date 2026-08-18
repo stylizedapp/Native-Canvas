@@ -5,29 +5,87 @@ export struct LayerItem {
     id: int,
     name: string,
     depth: int,
+    selected: bool,
 }
 
 // Дерево слоёв (список внутри Bento-карточки). Стиль — только здесь.
 // id — индекс слота NodeKey (младшие 32 бита as_ffi); список пересобирается
 // на каждую ревизию, поэтому потеря version-бита безопасна.
+// Ctrl+клик — переключение узла, Shift+клик — диапазон от якоря.
+// Drag-reorder: нажатие запоминает узел (drag-start), отпускание со сдвигом
+// по вертикали от исходной строки передаёт смещение в рядах (drop-layer).
+// Смещение в 0 — простой клик, порядка не меняет.
+// Переименование: двойной клик по строке открывает инлайн-поле (commit по
+// Enter/потере фокуса).
 export component LayersPanel inherits ListView {
     in-out property <[LayerItem]> layers;
-    in-out property <int> selected-layer: -1;
+    // Какой слой переименовывается (инлайн-поле); -1 — никто. Управляется
+    // извне: двойной клик сообщает start-rename, готовность — rename-done.
+    in property <int> editing-id: -1;
 
-    callback select-layer(int);
+    callback select-layer-mod(int, bool, bool);
+    callback drag-start(int);
+    callback drop-layer(int, float);
+    callback rename-layer(int, string);
+    callback rename-done();
+    // ПКМ отпущена по строке слоя: id строки + локальный y панели.
+    callback context-menu(int, float);
+    callback start-rename(int);
 
     for item in root.layers : Rectangle {
         height: 28px;
         border-radius: Theme.radius-sm;
-        background: root.selected-layer == item.id ? Theme.selection : (touch.pressed ? Theme.surface-raised : transparent);
+        background: item.selected ? Theme.selection : (touch.pressed ? Theme.surface-raised : transparent);
         touch := TouchArea {
-            clicked => { root.select-layer(item.id); }
-            Text {
+            pointer-event(event) => {
+                if (event.kind == PointerEventKind.down) {
+                    if (event.button == PointerEventButton.left) {
+                        root.drag-start(item.id);
+                    }
+                }
+                if (event.kind == PointerEventKind.up) {
+                    if (event.button == PointerEventButton.left) {
+                        root.select-layer-mod(item.id, event.modifiers.control, event.modifiers.shift);
+                        root.drop-layer(item.id, touch.mouse-y / 1px);
+                    } else if (event.button == PointerEventButton.right) {
+                        root.context-menu(item.id, touch.mouse-y / 1px);
+                    }
+                }
+            }
+            double-clicked => {
+                root.start-rename(item.id);
+            }
+            if root.editing-id != item.id : Text {
                 text: item.name;
-                color: root.selected-layer == item.id ? Theme.text : Theme.text-muted;
+                color: item.selected ? Theme.text : Theme.text-muted;
                 font-size: Theme.font-sm;
                 vertical-alignment: center;
                 x: Theme.space-2 + (item.depth * 10px);
+            }
+            if root.editing-id == item.id : Rectangle {
+                x: Theme.space-1 + (item.depth * 10px);
+                width: parent.width - Theme.space-2 - (item.depth * 10px);
+                height: parent.height - Theme.space-1;
+                y: 2px;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.accent;
+                background: Theme.bg;
+                rename-input := TextInput {
+                    text: item.name;
+                    color: Theme.text;
+                    font-size: Theme.font-sm;
+                    vertical-alignment: center;
+                    horizontal-alignment: left;
+                    padding-left: Theme.space-2;
+                    padding-right: Theme.space-2;
+                    init => { self.focus(); }
+                    accepted => {
+                        root.rename-layer(item.id, self.text);
+                        root.rename-done();
+                    }
+                    edited => { }
+                }
             }
         }
     }

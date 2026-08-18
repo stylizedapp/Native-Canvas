@@ -79,6 +79,24 @@ pub fn pick(scene: &mut SceneGraph, world: Vec2) -> Option<NodeKey> {
     best.map(|(_, key)| key)
 }
 
+/// Стек узлов под точкой сверху вниз (для Ctrl+клик deep-select):
+/// все видимые узлы, чей контур содержит `world`.
+pub fn pick_stack(scene: &mut SceneGraph, world: Vec2) -> Vec<NodeKey> {
+    scene.flush_transforms();
+    let mut hits = Vec::new();
+    for key in scene.walk().into_iter().rev() {
+        let Some(node) = scene.get(key) else { continue };
+        if !node.is_visible {
+            continue;
+        }
+        let Some(bbox) = scene.world_bbox(key) else { continue };
+        if point_in_bbox(world, bbox.0, bbox.1) && precise_hit(scene, key, world) {
+            hits.push(key);
+        }
+    }
+    hits
+}
+
 fn point_in_bbox(p: Vec2, min: Vec2, max: Vec2) -> bool {
     p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y
 }

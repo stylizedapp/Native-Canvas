@@ -1,9 +1,13 @@
 pub mod model;
+pub mod gizmo;
 pub mod transform;
 pub mod grid;
 pub mod tool;
 pub mod renderers;
 pub mod history;
 pub mod controller;
+pub mod shortcuts;
+pub mod color;
+pub mod expr;
 pub mod serialize;
 pub mod profiler;

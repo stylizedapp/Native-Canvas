@@ -1,0 +1,65 @@
+import { Theme } from "../theme.slint";
+
+export struct ContextMenuEntry {
+    id: string,
+    text: string,
+    enabled: bool,
+}
+
+// Контекстное меню (оверлей поверх всего окна). Позиция карточки задаётся
+// экранными координатами извне; клик мимо закрывает.
+export component ContextMenu inherits Rectangle {
+    in-out property <bool> open: false;
+    in property <float> menu-x: 0;
+    in property <float> menu-y: 0;
+    in property <[ContextMenuEntry]> entries;
+
+    callback close();
+    callback action(string);
+
+    visible: root.open;
+    background: transparent;
+
+    // Прозрачная подложка во весь экран: любой клик мимо — закрыть.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        TouchArea {
+            clicked => { root.close(); }
+        }
+    }
+
+    Rectangle {
+        x: root.menu-x * 1px;
+        y: root.menu-y * 1px;
+        width: 180px;
+        max-height: 360px;
+        background: Theme.surface-raised;
+        border-radius: Theme.radius-md;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+        clip: true;
+
+        VerticalLayout {
+            padding: Theme.space-1;
+            spacing: 2px;
+            for entry in root.entries : Rectangle {
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: entry.enabled && (it.pressed || it.has-hover) ? Theme.surface : transparent;
+                it := TouchArea {
+                    enabled: entry.enabled;
+                    clicked => { root.action(entry.id); }
+                    Text {
+                        text: entry.text;
+                        color: entry.enabled ? Theme.text : Theme.text-faint;
+                        font-size: Theme.font-sm;
+                        vertical-alignment: center;
+                        x: Theme.space-2;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,104 @@
+import { Field } from "ds.slint";
+import { Theme } from "../theme.slint";
+
+export struct PaletteCommand {
+    title: string,
+    hint: string,
+}
+
+// Строка-палитра команд: оверлей поверх всего окна. Фильтрация списка
+// выполняется в Rust по `filter-changed`; клик или Enter (первый результат)
+// выполняют команду.
+export component CommandPalette inherits Rectangle {
+    in-out property <bool> open: false;
+    in property <[PaletteCommand]> commands;
+    in-out property <string> filter: "";
+
+    callback close();
+    callback run(string);
+    callback accept(string);
+    callback filter-changed(string);
+
+    visible: root.open;
+    background: transparent;
+
+    changed open => {
+        if (root.open) {
+            root.filter = "";
+            root.filter-changed("");
+            input-field.request-focus();
+        }
+    }
+
+    // Затемнение фона: клик по нему закрывает палитру.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000088;
+        TouchArea {
+            clicked => { root.close(); }
+        }
+    }
+
+    // Карточка.
+    Rectangle {
+        x: (parent.width - 480px) / 2;
+        y: 96px;
+        width: 480px;
+        background: Theme.surface-raised;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+
+        VerticalLayout {
+            padding: Theme.space-3;
+            spacing: Theme.space-2;
+
+            Text {
+                text: "Command palette";
+                color: Theme.text;
+                font-weight: 700;
+                font-size: Theme.font-md;
+            }
+
+            input-field := Field {
+                text: root.filter;
+                edited(t) => {
+                    root.filter = t;
+                    root.filter-changed(t);
+                }
+                accepted(t) => { root.accept(t); }
+            }
+
+            // Уже отфильтрованный список команд.
+            VerticalLayout {
+                max-height: 320px;
+                spacing: Theme.space-1;
+                for cmd in root.commands : Rectangle {
+                    height: 34px;
+                    border-radius: Theme.radius-sm;
+                    background: touch.pressed ? Theme.surface : transparent;
+                    touch := TouchArea {
+                        clicked => { root.run(cmd.title); }
+                        HorizontalLayout {
+                            spacing: Theme.space-2;
+                            Text {
+                                text: cmd.title;
+                                color: Theme.text;
+                                font-size: Theme.font-sm;
+                                vertical-alignment: center;
+                            }
+                            HorizontalLayout { horizontal-stretch: 1; }
+                            Text {
+                                text: cmd.hint;
+                                color: Theme.text-muted;
+                                font-size: Theme.font-xs;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

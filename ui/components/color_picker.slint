@@ -1,0 +1,257 @@
+import { Field, NumberField } from "ds.slint";
+import { Theme } from "../theme.slint";
+
+// Полный color picker: hue-бар + SV-область + слайдер alpha + HEX/RGBA/HSL
+// + свачи. Состояние цвета живёт в Rust: сюда приходят компоненты
+// (r/g/b/a, hex, h/s/v, hue-color/solid/preview), драги и поля коммитятся
+// обратно, Rust пересчитывает цвет и шлёт обновление — никакой логики
+// преобразований в .slint.
+export component ColorPicker inherits Rectangle {
+    in-out property <bool> open: false;
+
+    in-out property <int> r: 0;
+    in-out property <int> g: 0;
+    in-out property <int> b: 0;
+    in-out property <int> a: 255;
+    in-out property <string> hex: "#00000000";
+    in-out property <float> h: 0.0;
+    in-out property <float> s: 0.0;
+    in-out property <float> v: 0.0;
+    // Чистый оттенок — фон SV-области; непрозрачный текущий RGB — конец
+    // слайдера alpha; текущий цвет с alpha — превью.
+    in-out property <color> hue-color: #ff0000;
+    in-out property <color> solid: #000000;
+    in-out property <color> preview: #00000000;
+    in-out property <[color]> swatches;
+
+    callback hue-drag(float);
+    callback sv-drag(float, float);
+    callback alpha-drag(float);
+    callback hex-commit(string);
+    callback rgba-commit(int, string);
+    callback hsl-commit(int, string);
+    callback swatch-commit(int);
+    callback done();
+    callback cancel();
+
+    visible: root.open;
+    background: transparent;
+
+    // Прозрачная подложка во весь экран: клик мимо — закрыть.
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+        TouchArea { clicked => { root.cancel(); } }
+    }
+
+    // Карточка пикера.
+    Rectangle {
+        x: max((root.width - 320px) / 2.0, 8px);
+        y: max((root.height - 540px) / 2.0, 8px);
+        width: 320px;
+        height: 540px;
+        background: Theme.surface;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+
+        VerticalLayout {
+            padding: Theme.space-4;
+            spacing: Theme.space-2;
+
+            // ===== SV-область =====
+            Rectangle {
+                height: 140px;
+                border-radius: Theme.radius-sm;
+                clip: true;
+                sv-box := Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: @linear-gradient(90deg, white, root.hue-color);
+                    Rectangle {
+                        width: 100%;
+                        height: 100%;
+                        background: @linear-gradient(180deg, transparent, black);
+                    }
+                    sv-marker := Rectangle {
+                        width: 16px;
+                        height: 16px;
+                        border-radius: 8px;
+                        border-width: 2px;
+                        border-color: white;
+                        background: transparent;
+                        x: root.s * (sv-box.width - self.width);
+                        y: (1.0 - root.v) * (sv-box.height - self.height);
+                    }
+                    sv-touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down || (e.kind == PointerEventKind.move && self.pressed)) {
+                                let sx = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                                let sy = clamp(self.mouse-y / self.height, 0.0, 1.0);
+                                root.sv-drag(sx, 1.0 - sy);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ===== Hue-бар =====
+            Rectangle {
+                height: 18px;
+                border-radius: Theme.radius-sm;
+                clip: true;
+                hue-box := Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: @linear-gradient(90deg, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000);
+                    hue-marker := Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        border-width: 2px;
+                        border-color: white;
+                        background: transparent;
+                        x: (root.h / 360.0) * (hue-box.width - self.width);
+                        y: (hue-box.height - self.height) / 2.0;
+                    }
+                    hue-touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down || (e.kind == PointerEventKind.move && self.pressed)) {
+                                let hx = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                                root.hue-drag(hx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ===== Превью + HEX =====
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Rectangle {
+                    width: 34px;
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    background: root.preview;
+                }
+                Field {
+                    horizontal-stretch: 1;
+                    text: root.hex;
+                    edited(t) => { root.hex-commit(t); }
+                    accepted(t) => { root.hex-commit(t); }
+                }
+            }
+
+            // ===== Альфа-слайдер =====
+            Rectangle {
+                height: 18px;
+                border-radius: Theme.radius-sm;
+                clip: true;
+                alpha-box := Rectangle {
+                    width: 100%;
+                    height: 100%;
+                    background: @linear-gradient(90deg, transparent, root.solid);
+                    alpha-marker := Rectangle {
+                        width: 18px;
+                        height: 18px;
+                        border-radius: 9px;
+                        border-width: 2px;
+                        border-color: white;
+                        background: transparent;
+                        x: (root.a / 255.0) * (alpha-box.width - self.width);
+                        y: (alpha-box.height - self.height) / 2.0;
+                    }
+                    alpha-touch := TouchArea {
+                        width: 100%;
+                        height: 100%;
+                        pointer-event(e) => {
+                            if (e.kind == PointerEventKind.down || (e.kind == PointerEventKind.move && self.pressed)) {
+                                let ax = clamp(self.mouse-x / self.width, 0.0, 1.0);
+                                root.alpha-drag(ax);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ===== RGBA =====
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                NumberField { label: "R"; value: root.r; edited(t) => { root.rgba-commit(0, t); } set-value(t) => { root.rgba-commit(0, t); } }
+                NumberField { label: "G"; value: root.g; edited(t) => { root.rgba-commit(1, t); } set-value(t) => { root.rgba-commit(1, t); } }
+                NumberField { label: "B"; value: root.b; edited(t) => { root.rgba-commit(2, t); } set-value(t) => { root.rgba-commit(2, t); } }
+                NumberField { label: "A"; value: root.a; edited(t) => { root.rgba-commit(3, t); } set-value(t) => { root.rgba-commit(3, t); } }
+            }
+
+            // ===== HSL =====
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                NumberField { label: "H"; value: root.h; edited(t) => { root.hsl-commit(0, t); } set-value(t) => { root.hsl-commit(0, t); } }
+                NumberField { label: "S"; value: root.s * 100.0; edited(t) => { root.hsl-commit(1, t); } set-value(t) => { root.hsl-commit(1, t); } }
+                NumberField { label: "L"; value: root.v * 100.0; edited(t) => { root.hsl-commit(2, t); } set-value(t) => { root.hsl-commit(2, t); } }
+            }
+
+            // ===== Свачи =====
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                for sw[i] in root.swatches : Rectangle {
+                    width: 22px;
+                    height: 22px;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    background: sw;
+                    sw-touch := TouchArea {
+                        clicked => { root.swatch-commit(i); }
+                    }
+                }
+            }
+
+            // ===== Кнопки =====
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Rectangle {
+                    height: 30px;
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    background: cancel-touch.pressed ? Theme.surface-raised : Theme.surface;
+                    cancel-touch := TouchArea {
+                        clicked => { root.cancel(); }
+                        Text {
+                            text: "Cancel";
+                            color: Theme.text;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+                Rectangle {
+                    height: 30px;
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    background: done-touch.pressed ? Theme.accent-hover : Theme.accent;
+                    done-touch := TouchArea {
+                        clicked => { root.done(); }
+                        Text {
+                            text: "Done";
+                            color: Theme.accent-contrast;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

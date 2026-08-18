@@ -1,0 +1,76 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+export struct ShortcutRow {
+    keys: string,
+    action: string,
+}
+
+// Справочник горячих клавиш (Ctrl+/). Статический оверлей.
+export component ShortcutsPanel inherits Rectangle {
+    in-out property <bool> open: false;
+    in property <[ShortcutRow]> rows;
+
+    callback close();
+
+    visible: root.open;
+    background: transparent;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #00000066;
+        TouchArea {
+            clicked => { root.close(); }
+        }
+    }
+
+    Rectangle {
+        x: (parent.width - 420px) / 2;
+        y: (parent.height - 360px) / 2;
+        width: 420px;
+        height: 360px;
+        background: Theme.surface-raised;
+        border-radius: Theme.radius-lg;
+        border-width: 1px;
+        border-color: Theme.border-strong;
+
+        VerticalLayout {
+            padding: Theme.space-3;
+            spacing: Theme.space-2;
+
+            Text {
+                text: "Keyboard shortcuts";
+                color: Theme.text;
+                font-weight: 700;
+                font-size: Theme.font-md;
+            }
+
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: Theme.space-1;
+                    for row in root.rows : HorizontalLayout {
+                        height: 26px;
+                        spacing: Theme.space-3;
+                        Text {
+                            text: row.keys;
+                            color: Theme.accent;
+                            font-family: "Consolas";
+                            font-size: Theme.font-xs;
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                            min-width: 120px;
+                        }
+                        Text {
+                            text: row.action;
+                            color: Theme.text;
+                            font-size: Theme.font-sm;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

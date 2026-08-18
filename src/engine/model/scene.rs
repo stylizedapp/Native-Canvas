@@ -5,11 +5,12 @@
 //! грязным; перед чтением `world_transform`/`world_bbox` нужно вызвать
 //! [`SceneGraph::flush_transforms`] (обычно — раз в кадр перед рендером).
 
-use crate::engine::model::nodes::{NodeKey, NodeKind};
+use crate::engine::model::nodes::{NodeKey, NodeKind, ShapeKind};
 use crate::engine::model::types::{BlendMode, Effect, Paint, Stroke};
 use glam::{Affine2, Vec2};
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
+use std::collections::HashMap;
 
 /// Узел дерева сцены. Идентификатор узла — его ключ в арене `SceneGraph.nodes`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -128,6 +129,13 @@ impl SceneGraph {
         key
     }
 
+    /// Добавляет уже существующий узел в корни (для временных графов).
+    pub fn add_root(&mut self, key: NodeKey) {
+        if !self.roots.contains(&key) {
+            self.roots.push(key);
+        }
+    }
+
     /// Вставляет узел дочерним к `parent`. Возвращает `None`, если родитель не найден.
     pub fn insert_child(&mut self, parent: NodeKey, name: &str, kind: NodeKind) -> Option<NodeKey> {
         if !self.nodes.contains_key(parent) {
@@ -222,6 +230,133 @@ impl SceneGraph {
         true
     }
 
+    /// Глубоко клонирует поддерево `key` с новыми ключами и вставляет копию
+    /// сиблингом сразу после исходного узла. Возвращает ключ копии.
+    pub fn duplicate(&mut self, key: NodeKey) -> Option<NodeKey> {
+        self.nodes.get(key)?;
+        // Собираем поддерево в предпорядке (родитель раньше потомков).
+        let mut stack = vec![key];
+        let mut order = Vec::new();
+        while let Some(k) = stack.pop() {
+            order.push(k);
+            if let Some(n) = self.nodes.get(k) {
+                stack.extend(n.children.iter().copied());
+            }
+        }
+        let mut map: HashMap<NodeKey, NodeKey> = HashMap::new();
+        for k in &order {
+            let parent = self.nodes.get(*k).and_then(|n| n.parent);
+            let new_parent = parent.and_then(|p| map.get(&p)).copied();
+            let mut copy = self.nodes.get(*k).cloned()?;
+            copy.parent = new_parent;
+            copy.is_world_dirty = true;
+            map.insert(*k, self.nodes.insert(copy));
+        }
+        // Дочерние списки копий ссылаются на старые ключи — пересобираем.
+        for (_, new) in &map {
+            let remap = |c: &NodeKey| map.get(c).copied();
+            if let Some(n) = self.nodes.get_mut(*new) {
+                n.children = n.children.iter().filter_map(remap).collect();
+            }
+        }
+        let new_root = map[&key];
+        // Вставляем копию сразу после оригинала в списке сиблингов.
+        let mut siblings = match self.nodes.get(key).and_then(|n| n.parent) {
+            Some(p) => self.nodes.get(p).map(|n| n.children.clone()).unwrap_or_default(),
+            None => self.roots.clone(),
+        };
+        if let Some(i) = siblings.iter().position(|&k| k == key) {
+            siblings.insert(i + 1, new_root);
+            match self.nodes.get(key).and_then(|n| n.parent) {
+                Some(p) => {
+                    if let Some(n) = self.nodes.get_mut(p) {
+                        n.children = siblings;
+                    }
+                }
+                None => self.roots = siblings,
+            }
+        }
+        self.mark_subtree_dirty(new_root);
+        Some(new_root)
+    }
+
+    /// Копирует поддерево `key` (вместе с потомством) во временный граф `out`
+    /// и возвращает ключ копии в `out`. Идентичность между графами не нужна —
+    /// дочерние ссылки пересобираются по рекурсии.
+    pub fn clone_into(&self, out: &mut SceneGraph, key: NodeKey) -> Option<NodeKey> {
+        fn rec(
+            src: &SceneGraph,
+            out: &mut SceneGraph,
+            key: NodeKey,
+            map: &mut HashMap<NodeKey, NodeKey>,
+        ) -> Option<NodeKey> {
+            let node = src.nodes.get(key)?;
+            let parent = node.parent.and_then(|p| map.get(&p)).copied();
+            let mut copy = node.clone();
+            copy.parent = parent;
+            copy.children = Vec::new();
+            copy.is_world_dirty = true;
+            let nk = out.nodes.insert(copy);
+            map.insert(key, nk);
+            for child in &node.children {
+                if let Some(cnk) = rec(src, out, *child, map) {
+                    out.nodes.get_mut(nk).expect("только что вставлен").children.push(cnk);
+                }
+            }
+            Some(nk)
+        }
+        let mut map = HashMap::new();
+        rec(self, out, key, &mut map)
+    }
+
+    /// Вставляет глубокую копию поддерева из временного графа `src` (узел `key`)
+    /// новым корнем (или дочерним к `parent`). Возвращает ключ копии.
+    pub fn insert_clone_from(
+        &mut self,
+        src: &SceneGraph,
+        key: NodeKey,
+        parent: Option<NodeKey>,
+    ) -> Option<NodeKey> {
+        fn rec(
+            dst: &mut SceneGraph,
+            src: &SceneGraph,
+            key: NodeKey,
+            parent: Option<NodeKey>,
+            map: &mut HashMap<NodeKey, NodeKey>,
+        ) -> Option<NodeKey> {
+            let node = src.nodes.get(key)?;
+            let mut copy = node.clone();
+            copy.parent = parent;
+            copy.children = Vec::new();
+            copy.is_world_dirty = true;
+            let nk = dst.nodes.insert(copy);
+            map.insert(key, nk);
+            for child in &node.children {
+                if let Some(cnk) = rec(dst, src, *child, Some(nk), map) {
+                    dst.nodes.get_mut(nk).expect("только что вставлен").children.push(cnk);
+                }
+            }
+            Some(nk)
+        }
+        let mut map = HashMap::new();
+        let nk = rec(self, src, key, parent, &mut map);
+        if parent.is_none() {
+            if let Some(k) = nk {
+                self.add_root(k);
+            }
+        }
+        nk
+    }
+
+    /// Список сиблингов узла в порядке z-order (узел входит в список).
+    pub fn siblings_of(&self, key: NodeKey) -> Vec<NodeKey> {
+        let Some(node) = self.nodes.get(key) else { return Vec::new() };
+        match node.parent {
+            Some(p) => self.nodes.get(p).map(|n| n.children.clone()).unwrap_or_default(),
+            None => self.roots.clone(),
+        }
+    }
+
     // --- Мутации с инвалидацией кэша ---
 
     /// Устанавливает локальную трансформацию и помечает поддерево грязным.
@@ -246,9 +381,113 @@ impl SceneGraph {
 
     // --- Мировые трансформации ---
 
+    /// Раскладывает детей фреймов с `auto_layout` внутри родителя: позиции
+    /// перезаписываются по направлению/отступу/выравниванию, дети помечаются
+    /// грязными. Запускается перед пересчётом мировых трансформаций.
+    fn apply_auto_layouts(&mut self) {
+        use crate::engine::model::types::{LayoutAlign, LayoutDirection, LayoutJustify};
+        let frames: Vec<NodeKey> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| matches!(n.kind, NodeKind::Frame { auto_layout: Some(_), .. }))
+            .map(|(k, _)| k)
+            .collect();
+        for key in frames {
+            let Some(children) = self.nodes.get(key).map(|n| n.children.clone()) else {
+                continue;
+            };
+            if children.is_empty() {
+                continue;
+            }
+            let Some((cfg, frame_size)) = self.nodes.get(key).and_then(|n| match &n.kind {
+                NodeKind::Frame { size, auto_layout: Some(cfg), .. } => Some((*cfg, *size)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let [pt, pr, pb, pl] = cfg.padding;
+
+            // Собственные размеры детей и их основная ось.
+            let sizes: Vec<Vec2> = children
+                .iter()
+                .filter_map(|&ck| self.nodes.get(ck).map(|n| n.kind.local_bbox()))
+                .map(|(a, b)| b - a)
+                .collect();
+            if sizes.len() != children.len() {
+                continue;
+            }
+            let horizontal = cfg.direction == LayoutDirection::Horizontal;
+            let main_of = |s: Vec2| if horizontal { s.x } else { s.y };
+            let cross_of = |s: Vec2| if horizontal { s.y } else { s.x };
+            let frame_main = if horizontal { frame_size.x } else { frame_size.y };
+            let frame_cross = if horizontal { frame_size.y } else { frame_size.x };
+            let main: Vec<f32> = sizes.iter().map(|&s| main_of(s)).collect();
+            let sum_main: f32 = main.iter().sum();
+            let n = children.len() as f32;
+            let free = frame_main - pl - pr - sum_main;
+
+            // Эффективный отступ между детьми.
+            let spacing = match cfg.justify_content {
+                LayoutJustify::SpaceBetween if n > 1.0 => (free / (n - 1.0)).max(0.0),
+                _ => cfg.spacing,
+            };
+
+            // Начало основной оси.
+            let start_main = match cfg.justify_content {
+                LayoutJustify::Min => pl,
+                LayoutJustify::Center => pl + free * 0.5,
+                LayoutJustify::Max => pl + free,
+                LayoutJustify::SpaceBetween => pl,
+            };
+
+            let mut cursor = start_main;
+            for (i, &ck) in children.iter().enumerate() {
+                let s = sizes[i];
+                // Позиция поперёк основной оси.
+                let cross = match cfg.align_items {
+                    LayoutAlign::Stretch => pt,
+                    LayoutAlign::Min => pt,
+                    LayoutAlign::Center => pt + (frame_cross - cross_of(s)) * 0.5,
+                    LayoutAlign::Max => pt + (frame_cross - cross_of(s)),
+                };
+                let pos = if horizontal {
+                    Vec2::new(cursor, cross)
+                } else {
+                    Vec2::new(cross, cursor)
+                };
+                if let Some(n) = self.nodes.get_mut(ck) {
+                    // Stretch растягивает ребёнка по поперечной оси.
+                    if cfg.align_items == LayoutAlign::Stretch {
+                        match &mut n.kind {
+                            NodeKind::Frame { size, .. } => {
+                                if horizontal {
+                                    size.y = (frame_cross - pt - pb).max(0.0);
+                                } else {
+                                    size.x = (frame_cross - pt - pb).max(0.0);
+                                }
+                            }
+                            NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => {
+                                if horizontal {
+                                    size.y = (frame_cross - pt - pb).max(0.0);
+                                } else {
+                                    size.x = (frame_cross - pt - pb).max(0.0);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    n.local_transform.translation = pos;
+                    n.is_world_dirty = true;
+                }
+                cursor += main[i] + spacing;
+            }
+        }
+    }
+
     /// Пересчитывает `world_transform` для всех грязных узлов в порядке
     /// «родитель раньше потомка». Вызывайте после мутаций, перед рендером.
     pub fn flush_transforms(&mut self) {
+        self.apply_auto_layouts();
         let order = self.walk();
         for key in order {
             let dirty = self.nodes.get(key).map(|n| n.is_world_dirty).unwrap_or(false);
@@ -511,5 +750,60 @@ mod tests {
         let n = g.get(a).unwrap();
         assert_eq!(n.fills.len(), 1);
         assert_eq!(n.strokes.len(), 1);
+    }
+
+    #[test]
+    fn auto_layout_row_positions_children() {
+        use crate::engine::model::types::{AutoLayoutConfig, LayoutDirection};
+        let mut g = SceneGraph::new();
+        let frame = g.insert_root("F", NodeKind::Frame {
+            size: Vec2::new(100.0, 100.0),
+            clip_content: false,
+            corner_radii: [0.0; 4],
+            auto_layout: Some(AutoLayoutConfig {
+                direction: LayoutDirection::Horizontal,
+                spacing: 10.0,
+                padding: [5.0, 5.0, 5.0, 5.0],
+                ..AutoLayoutConfig::default()
+            }),
+            constraints: Default::default(),
+        });
+        let a = g.insert_child(frame, "A", rect_kind(20.0, 20.0)).unwrap();
+        let b = g.insert_child(frame, "B", rect_kind(30.0, 30.0)).unwrap();
+        g.flush_transforms();
+        // A начинается с pl=5; B — через 20 + gap 10.
+        let ta = g.get(a).unwrap().local_transform.translation;
+        let tb = g.get(b).unwrap().local_transform.translation;
+        assert!((ta - Vec2::new(5.0, 5.0)).length() < 1e-3);
+        assert!((tb - Vec2::new(35.0, 5.0)).length() < 1e-3);
+    }
+
+    #[test]
+    fn auto_layout_column_and_stretch() {
+        use crate::engine::model::types::{AutoLayoutConfig, LayoutAlign, LayoutDirection, LayoutJustify};
+        let mut g = SceneGraph::new();
+        let frame = g.insert_root("F", NodeKind::Frame {
+            size: Vec2::new(100.0, 200.0),
+            clip_content: false,
+            corner_radii: [0.0; 4],
+            auto_layout: Some(AutoLayoutConfig {
+                direction: LayoutDirection::Vertical,
+                spacing: 0.0,
+                padding: [0.0, 0.0, 0.0, 0.0],
+                align_items: LayoutAlign::Stretch,
+                justify_content: LayoutJustify::Min,
+            }),
+            constraints: Default::default(),
+        });
+        let a = g.insert_child(frame, "A", rect_kind(20.0, 40.0)).unwrap();
+        let b = g.insert_child(frame, "B", rect_kind(20.0, 40.0)).unwrap();
+        g.flush_transforms();
+        let ta = g.get(a).unwrap().local_transform.translation;
+        let tb = g.get(b).unwrap().local_transform.translation;
+        assert!((ta - Vec2::new(0.0, 0.0)).length() < 1e-3);
+        assert!((tb - Vec2::new(0.0, 40.0)).length() < 1e-3);
+        // Stretch растягивает детей по ширине фрейма (100).
+        let sa = g.get(a).unwrap().kind.local_bbox();
+        assert_eq!(sa.1.x, 100.0);
     }
 }

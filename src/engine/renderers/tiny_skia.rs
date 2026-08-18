@@ -1,6 +1,7 @@
 use super::{
-    rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, GRID, ORIGIN, PAGE_BG,
-    PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
+    rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, GIZMO_HANDLE_FILL,
+    GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN, PAGE_BG, PAGE_BORDER,
+    PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
 };
 use super::super::grid::GridConfig;
 use super::super::model::nodes::{NodeKey, NodeKind, ShapeKind};
@@ -9,9 +10,12 @@ use super::super::model::types::Paint as ModelPaint;
 use super::super::profiler::FrameMetrics;
 use super::super::transform::Camera;
 use crate::engine::controller::Preview;
+use crate::engine::gizmo;
 use glam::{Affine2, Vec2};
 use std::time::Instant;
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, PixmapMut, Rect, Stroke as SkStroke, Transform};
+use tiny_skia::{
+    Color, FillRule, Paint, PathBuilder, PixmapMut, Rect, Stroke as SkStroke, StrokeDash, Transform,
+};
 
 /// Бэкенд на tiny-skia (CPU-растеризация) — фолбэк, когда GPU недоступен.
 pub struct TinySkiaRenderer;
@@ -30,6 +34,7 @@ impl Renderer for TinySkiaRenderer {
         selected: &[NodeKey],
         grid: GridConfig,
         preview: Option<Preview>,
+        marquee: Option<(Vec2, Vec2)>,
         out: &mut [u8],
     ) -> RenderOutcome {
         let t0 = Instant::now();
@@ -75,16 +80,31 @@ impl Renderer for TinySkiaRenderer {
             let world = acc * node.local_transform;
             let (mn, mx) = world_bbox(&node.kind, world);
             if rects_intersect(mn, mx, view_min, view_max) {
-                draw_node(node, world, cam_ts, &mut pixmap);
+                draw_node(node, world, cam_ts, camera.zoom, &mut pixmap);
             }
             stack.extend(node.children.iter().rev().map(|&ch| (ch, world)));
         }
 
         // Подсветка выделенных узлов (обводка ограничивающей рамки).
+        // Хэндлы гизмо рисуем только при ровно одном выделенном узле.
         for key in selected {
             if let Some((mn, mx)) = scene.world_bbox(*key) {
                 draw_bbox_highlight(&mut pixmap, cam_ts, mn, mx);
+                if selected.len() == 1 {
+                    let resizable = scene
+                        .get(*key)
+                        .map(|n| gizmo::resizable(&n.kind))
+                        .unwrap_or(false);
+                    if resizable {
+                        draw_gizmo_handles(&mut pixmap, cam_ts, mn, mx, camera.zoom);
+                    }
+                }
             }
+        }
+
+        // Рамка марки-выделения.
+        if let Some((a, b)) = marquee {
+            draw_marquee(&mut pixmap, cam_ts, a, b, camera.zoom);
         }
 
         // Маркер начала координат (0,0) — для визуальной проверки пана/зума.
@@ -163,7 +183,56 @@ fn draw_grid(pixmap: &mut PixmapMut, cam_ts: Transform, camera: &Camera, view_mi
     pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
 }
 
-fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, pixmap: &mut PixmapMut) {
+/// Добавляет в PathBuilder скруглённый прямоугольник `0..size` с радиусами
+/// `[tl,tr,br,bl]` (дуги — кубические аппроксимации). Заливка и обводка
+/// используют один и тот же путь, поэтому обводка не срезает углы.
+fn push_rounded_rect(pb: &mut PathBuilder, size: Vec2, radii: [f32; 4]) {
+    let w = size.x.max(0.0);
+    let h = size.y.max(0.0);
+    let max_r = w.min(h) * 0.5;
+    let r = [
+        radii[0].max(0.0).min(max_r),
+        radii[1].max(0.0).min(max_r),
+        radii[2].max(0.0).min(max_r),
+        radii[3].max(0.0).min(max_r),
+    ];
+    let k = 0.552_284_75; // константа кубической аппроксимации дуги 90°.
+    // Старт: верхняя грань правее верхнего-левого угла.
+    pb.move_to(r[0], 0.0);
+    // Верхняя грань до верхнего-правого угла.
+    pb.line_to(w - r[1], 0.0);
+    // TR.
+    if r[1] > 0.0 {
+        pb.cubic_to(w - r[1] + r[1] * k, 0.0, w, r[1] * k, w, r[1]);
+    } else {
+        pb.line_to(w, 0.0);
+    }
+    // Правая грань до нижнего-правого угла.
+    pb.line_to(w, h - r[2]);
+    // BR.
+    if r[2] > 0.0 {
+        pb.cubic_to(w, h - r[2] + r[2] * k, w - r[2] + r[2] * k, h, w - r[2], h);
+    } else {
+        pb.line_to(w, h);
+    }
+    // Нижняя грань до нижнего-левого угла.
+    pb.line_to(r[3], h);
+    // BL.
+    if r[3] > 0.0 {
+        pb.cubic_to(r[3] - r[3] * k, h, 0.0, h - r[3] + r[3] * k, 0.0, h - r[3]);
+    } else {
+        pb.line_to(0.0, h);
+    }
+    // Левая грань до верхнего-левого угла.
+    pb.line_to(0.0, r[0]);
+    // TL.
+    if r[0] > 0.0 {
+        pb.cubic_to(0.0, r[0] - r[0] * k, r[0] - r[0] * k, 0.0, r[0], 0.0);
+    }
+    pb.close();
+}
+
+fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pixmap: &mut PixmapMut) {
     let combined = cam_ts.pre_concat(Transform::from_row(
         world.matrix2.x_axis.x,
         world.matrix2.x_axis.y,
@@ -175,10 +244,9 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, pixmap: &mut P
 
     let mut pb = PathBuilder::new();
     match &node.kind {
-        NodeKind::Frame { size, .. } | NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => {
-            if let Some(rect) = Rect::from_xywh(0.0, 0.0, size.x, size.y) {
-                pb.push_rect(rect);
-            }
+        NodeKind::Frame { size, corner_radii, .. }
+        | NodeKind::Shape(ShapeKind::Rectangle { size, corner_radii }) => {
+            push_rounded_rect(&mut pb, *size, *corner_radii);
         }
         NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => {
             if let Some(rect) = Rect::from_xywh(0.0, 0.0, radii.x, radii.y) {
@@ -218,7 +286,14 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, pixmap: &mut P
                     miter_limit: 4.0,
                     line_cap: tiny_skia::LineCap::Round,
                     line_join: tiny_skia::LineJoin::Round,
-                    dash: None,
+                    dash: if st.dash_pattern.is_empty() {
+                        None
+                    } else {
+                        // Пунктир в экранных координатах — делим на zoom, чтобы штрих
+                        // был постоянным на экране.
+                        let d: Vec<f32> = st.dash_pattern.iter().map(|d| *d / zoom).collect();
+                        StrokeDash::new(d, 0.0)
+                    },
                 };
                 pixmap.stroke_path(&path, &sp, &sk, combined, None);
             }
@@ -272,6 +347,57 @@ fn draw_bbox_highlight(pixmap: &mut PixmapMut, cam_ts: Transform, mn: Vec2, mx: 
         sp.set_color_rgba8(SELECTION[0], SELECTION[1], SELECTION[2], SELECTION[3]);
         sp.anti_alias = true;
         let sk = SkStroke { width: 1.5, ..Default::default() };
+        pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
+    }
+}
+
+/// 8 квадратов-хэндлов гизмо (белая заливка, синяя обводка). Экранный размер
+/// фиксированный — в мировых координатах это 10/zoom.
+fn draw_gizmo_handles(pixmap: &mut PixmapMut, cam_ts: Transform, mn: Vec2, mx: Vec2, zoom: f32) {
+    let h = gizmo::HANDLE_SIZE / zoom;
+    for (_handle, (a, b)) in gizmo::handle_rects(mn, mx, zoom) {
+        let Some(rect) = Rect::from_xywh(a.x, a.y, b.x - a.x, b.y - a.y) else { continue };
+        let mut fp = Paint::default();
+        fp.set_color_rgba8(GIZMO_HANDLE_FILL[0], GIZMO_HANDLE_FILL[1], GIZMO_HANDLE_FILL[2], GIZMO_HANDLE_FILL[3]);
+        fp.anti_alias = true;
+        pixmap.fill_rect(rect, &fp, cam_ts, None);
+        let mut pb = PathBuilder::new();
+        pb.push_rect(rect);
+        let Some(path) = pb.finish() else { continue };
+        let mut sp = Paint::default();
+        sp.set_color_rgba8(GIZMO_HANDLE_STROKE[0], GIZMO_HANDLE_STROKE[1], GIZMO_HANDLE_STROKE[2], GIZMO_HANDLE_STROKE[3]);
+        sp.anti_alias = true;
+        let sk = SkStroke { width: (h * 0.12).max(1.0 / zoom), ..Default::default() };
+        pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
+    }
+}
+
+/// Пунктирная рамка марки + полупрозрачная заливка. Dash в мировых координатах
+/// делим на zoom, чтобы штрих был постоянным на экране.
+fn draw_marquee(pixmap: &mut PixmapMut, cam_ts: Transform, a: Vec2, b: Vec2, zoom: f32) {
+    let min = Vec2::new(a.x.min(b.x), a.y.min(b.y));
+    let max = Vec2::new(a.x.max(b.x), a.y.max(b.y));
+    let Some(rect) = Rect::from_xywh(min.x, min.y, (max.x - min.x).max(1.0), (max.y - min.y).max(1.0))
+    else {
+        return;
+    };
+    let mut fp = Paint::default();
+    fp.set_color_rgba8(MARQUEE_FILL[0], MARQUEE_FILL[1], MARQUEE_FILL[2], MARQUEE_FILL[3]);
+    fp.anti_alias = true;
+    pixmap.fill_rect(rect, &fp, cam_ts, None);
+
+    let mut pb = PathBuilder::new();
+    pb.push_rect(rect);
+    if let Some(path) = pb.finish() {
+        let mut sp = Paint::default();
+        sp.set_color_rgba8(MARQUEE_STROKE[0], MARQUEE_STROKE[1], MARQUEE_STROKE[2], MARQUEE_STROKE[3]);
+        sp.anti_alias = true;
+        let dash = (4.0 / zoom).max(1.0);
+        let sk = SkStroke {
+            width: 1.0 / zoom,
+            dash: StrokeDash::new(vec![dash, dash], 0.0),
+            ..Default::default()
+        };
         pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
     }
 }

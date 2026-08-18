@@ -5,6 +5,7 @@ use super::profiler::FrameMetrics;
 use super::transform::Camera;
 use crate::engine::controller::Preview;
 use glam::{Affine2, Vec2};
+use ::vello::wgpu;
 
 mod tiny_skia;
 mod vello;
@@ -25,6 +26,12 @@ pub const GRID: [u8; 4] = [0x24, 0x24, 0x2a, 0xff];
 pub const SELECTION: [u8; 4] = [0x5b, 0x8c, 0xff, 0xff];
 pub const PREVIEW_FILL: [u8; 4] = [0x5b, 0x8c, 0xff, 60];
 pub const PREVIEW_STROKE: [u8; 4] = [0x6e, 0x9a, 0xff, 0xff];
+/// Gizmo: заливка хэндла и его обводка.
+pub const GIZMO_HANDLE_FILL: [u8; 4] = [0xff, 0xff, 0xff, 0xff];
+pub const GIZMO_HANDLE_STROKE: [u8; 4] = [0x5b, 0x8c, 0xff, 0xff];
+/// Marquee: заливка и рамка.
+pub const MARQUEE_FILL: [u8; 4] = [0x5b, 0x8c, 0xff, 26];
+pub const MARQUEE_STROKE: [u8; 4] = [0x6e, 0x9a, 0xff, 0xff];
 /// Маркер начала координат (0,0) — для визуальной проверки пана/зума.
 pub const ORIGIN: [u8; 4] = [0xff, 0x9f, 0x43, 0xff];
 
@@ -59,19 +66,83 @@ pub trait Renderer {
         selected: &[NodeKey],
         grid: GridConfig,
         preview: Option<Preview>,
+        marquee: Option<(Vec2, Vec2)>,
         out: &mut [u8],
     ) -> RenderOutcome;
 }
 
-/// Создаёт бэкенд: пробует GPU (vello), при неудаче — CPU (tiny-skia).
+/// Создаёт бэкенд с auto-detect:
+/// - `NATIVE_CANVAS_BACKEND=cpu|gpu` — явный выбор;
+/// - иначе на интегрированном GPU используем tiny-skia (vello-буферы ~150MB
+///   лежали бы в системной RAM, UMA), на дискретном — vello (фолбэк на CPU).
 pub fn create_renderer() -> Box<dyn Renderer> {
-    match VelloRenderer::new() {
-        Ok(r) => Box::new(r),
-        Err(e) => {
-            eprintln!("[renderer] vello (GPU) unavailable, using tiny-skia (CPU): {e}");
+    // Явный переключатель.
+    match std::env::var("NATIVE_CANVAS_BACKEND").as_deref() {
+        Ok("cpu") => {
+            eprintln!("[renderer] tiny-skia (CPU): forced by NATIVE_CANVAS_BACKEND=cpu");
+            return Box::new(TinySkiaRenderer);
+        }
+        Ok("gpu") => {
+            return match VelloRenderer::new() {
+                Ok(r) => {
+                    eprintln!("[renderer] vello (GPU): forced by NATIVE_CANVAS_BACKEND=gpu");
+                    Box::new(r)
+                }
+                Err(e) => {
+                    eprintln!("[renderer] vello unavailable, using tiny-skia (CPU): {e}");
+                    Box::new(TinySkiaRenderer)
+                }
+            };
+        }
+        _ => {}
+    }
+
+    // Авто-определение по типу адаптера.
+    match gpu_adapter_info() {
+        Ok(Some(info)) if info.device_type == wgpu::DeviceType::IntegratedGpu => {
+            eprintln!(
+                "[renderer] tiny-skia (CPU): integrated GPU ({}) — vello-буферы жили бы в RAM",
+                info.name
+            );
             Box::new(TinySkiaRenderer)
         }
+        Ok(Some(info)) if info.device_type == wgpu::DeviceType::DiscreteGpu => {
+            eprintln!("[renderer] vello (GPU): {} detected", info.name);
+            match VelloRenderer::new() {
+                Ok(r) => Box::new(r),
+                Err(e) => {
+                    eprintln!("[renderer] vello unavailable, using tiny-skia (CPU): {e}");
+                    Box::new(TinySkiaRenderer)
+                }
+            }
+        }
+        _ => match VelloRenderer::new() {
+            Ok(r) => {
+                eprintln!("[renderer] vello (GPU): adapter type unknown, using GPU");
+                Box::new(r)
+            }
+            Err(e) => {
+                eprintln!("[renderer] vello unavailable, using tiny-skia (CPU): {e}");
+                Box::new(TinySkiaRenderer)
+            }
+        },
     }
+}
+
+/// Тип и имя доступного GPU-адаптера (без создания устройства).
+fn gpu_adapter_info() -> Result<Option<wgpu::AdapterInfo>, Box<dyn std::error::Error>> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::default(),
+        display: None,
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        ..Default::default()
+    }))?;
+    Ok(Some(adapter.get_info()))
 }
 
 /// Мировая ограничивающая рамка по локальной геометрии и трансформации.

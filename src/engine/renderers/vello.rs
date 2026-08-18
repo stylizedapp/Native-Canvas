@@ -1,14 +1,16 @@
 ﻿use super::{
-    rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, GRID, ORIGIN, PAGE_BG,
-    PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
+    rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, GIZMO_HANDLE_FILL,
+    GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN, PAGE_BG, PAGE_BORDER,
+    PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
 };
 use super::super::grid::GridConfig;
 use super::super::model::nodes::{NodeKey, NodeKind, ShapeKind};
 use super::super::model::scene::{SceneGraph, SceneNode};
-use super::super::model::types::Paint as ModelPaint;
+use super::super::model::types::{Paint as ModelPaint, Stroke as ModelStroke};
 use super::super::profiler::FrameMetrics;
 use super::super::transform::Camera;
 use crate::engine::controller::Preview;
+use crate::engine::gizmo;
 use glam::{Affine2, Vec2};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -163,6 +165,7 @@ impl Renderer for VelloRenderer {
         selected: &[NodeKey],
         grid: GridConfig,
         preview: Option<Preview>,
+        marquee: Option<(Vec2, Vec2)>,
         out: &mut [u8],
     ) -> RenderOutcome {
         let t_total = Instant::now();
@@ -237,12 +240,26 @@ impl Renderer for VelloRenderer {
             stack.extend(node.children.iter().rev().map(|&ch| (ch, world)));
         }
 
-        // Подсветка выделенных узлов.
+        // Подсветка выделенных узлов. Хэндлы гизмо — при ровно одном узле.
         for key in selected {
             if let Some((mn, mx)) = scene.world_bbox(*key) {
                 let rect = kurbo::Rect::new(mn.x as f64, mn.y as f64, mx.x as f64, mx.y as f64);
                 stroke_shape(&mut vs, cam_t, rgba8(SELECTION, 1.0), (1.5 / zoom) as f64, &rect);
+                if selected.len() == 1 {
+                    let resizable = scene
+                        .get(*key)
+                        .map(|n| gizmo::resizable(&n.kind))
+                        .unwrap_or(false);
+                    if resizable {
+                        draw_gizmo_handles(&mut vs, cam_t, mn, mx, zoom);
+                    }
+                }
             }
+        }
+
+        // Рамка марки-выделения.
+        if let Some((a, b)) = marquee {
+            draw_marquee(&mut vs, cam_t, a, b, zoom);
         }
 
         // Маркер начала координат (0,0) — для визуальной проверки пана/зума.
@@ -430,6 +447,38 @@ fn draw_origin(scene: &mut VelloScene, cam_t: kurbo::Affine, w: f64) {
     fill_shape(scene, cam_t, color, &dot);
 }
 
+/// 8 квадратов-хэндлов гизмо (белая заливка, синяя обводка). Экранный размер
+/// фиксированный — в мировых координатах это 10/zoom.
+fn draw_gizmo_handles(scene: &mut VelloScene, cam_t: kurbo::Affine, mn: Vec2, mx: Vec2, zoom: f32) {
+    let h = (gizmo::HANDLE_SIZE / zoom) as f64;
+    let w = (h * 0.12).max((1.0 / zoom) as f64);
+    for (_handle, (a, b)) in gizmo::handle_rects(mn, mx, zoom) {
+        let rect = kurbo::Rect::new(a.x as f64, a.y as f64, b.x as f64, b.y as f64);
+        fill_shape(scene, cam_t, rgba8(GIZMO_HANDLE_FILL, 1.0), &rect);
+        stroke_shape(scene, cam_t, rgba8(GIZMO_HANDLE_STROKE, 1.0), w, &rect);
+    }
+}
+
+/// Рамка марки + полупрозрачная заливка. Штрих и width делим на zoom, чтобы
+/// оставались постоянными на экране (vello применяет dash в мировых координатах).
+fn draw_marquee(scene: &mut VelloScene, cam_t: kurbo::Affine, a: Vec2, b: Vec2, zoom: f32) {
+    let min = Vec2::new(a.x.min(b.x), a.y.min(b.y));
+    let max = Vec2::new(a.x.max(b.x), a.y.max(b.y));
+    let rect = kurbo::Rect::new(min.x as f64, min.y as f64, max.x as f64, max.y as f64);
+    fill_shape(scene, cam_t, rgba8(MARQUEE_FILL, 1.0), &rect);
+    let dash = (4.0 / zoom).max(1.0) as f64;
+    let stroke = Stroke {
+        width: (1.0 / zoom) as f64,
+        join: Join::Round,
+        miter_limit: 4.0,
+        start_cap: Cap::Butt,
+        end_cap: Cap::Butt,
+        dash_pattern: vec![dash, dash].into(),
+        dash_offset: 0.0,
+    };
+    scene.stroke(&stroke, cam_t, Brush::Solid(rgba8(MARQUEE_STROKE, 1.0)), None, &rect);
+}
+
 /// Первая сплошная заливка узла в виде RGBA8 (градиенты пока игнорируются).
 fn solid_fill(node: &SceneNode) -> Option<[u8; 4]> {
     node.fills.iter().find_map(|p| match p {
@@ -452,18 +501,60 @@ fn draw_filled(
     }
     if let Some(st) = node.strokes.first() {
         if st.width > 0.0 {
-            if let ModelPaint::Solid(c) = &st.paint {
-                stroke_shape(scene, screen, rgba8(c.to_rgba8(), 1.0), st.width as f64, shape);
+            if let ModelPaint::Solid(_) = &st.paint {
+                stroke_node(scene, screen, st, shape);
             }
         }
     }
 }
 
+/// Обводка узла с учётом пунктира (dash в мировых координатах).
+fn stroke_node(scene: &mut VelloScene, t: kurbo::Affine, st: &ModelStroke, shape: &impl kurbo::Shape) {
+    if st.width <= 0.0 {
+        return;
+    }
+    let color = match &st.paint {
+        ModelPaint::Solid(c) => rgba8(c.to_rgba8(), 1.0),
+        _ => return,
+    };
+    let mut stroke = Stroke {
+        width: st.width as f64,
+        join: Join::Round,
+        miter_limit: 4.0,
+        start_cap: Cap::Round,
+        end_cap: Cap::Round,
+        dash_pattern: Default::default(),
+        dash_offset: 0.0,
+    };
+    if !st.dash_pattern.is_empty() {
+        stroke.dash_pattern = st.dash_pattern.iter().map(|d| *d as f64).collect::<Vec<_>>().into();
+    }
+    scene.stroke(&stroke, t, Brush::Solid(color), None, shape);
+}
+
 fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
     match &node.kind {
-        NodeKind::Frame { size, .. } | NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => {
-            let rect = kurbo::Rect::new(0.0, 0.0, size.x as f64, size.y as f64);
-            draw_filled(scene, node, screen, &rect);
+        NodeKind::Frame { size, corner_radii, .. }
+        | NodeKind::Shape(ShapeKind::Rectangle { size, corner_radii }) => {
+            if *corner_radii == [0.0; 4] {
+                let rect = kurbo::Rect::new(0.0, 0.0, size.x as f64, size.y as f64);
+                draw_filled(scene, node, screen, &rect);
+            } else {
+                // Обводка идёт по тому же скруглённому пути, что и заливка.
+                let rr = kurbo::RoundedRect::new(
+                    0.0,
+                    0.0,
+                    size.x as f64,
+                    size.y as f64,
+                    kurbo::RoundedRectRadii::new(
+                        corner_radii[0] as f64,
+                        corner_radii[1] as f64,
+                        corner_radii[2] as f64,
+                        corner_radii[3] as f64,
+                    ),
+                );
+                draw_filled(scene, node, screen, &rr);
+            }
         }
         NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => {
             let rx = radii.x as f64 / 2.0;
@@ -474,12 +565,12 @@ fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
         NodeKind::Shape(ShapeKind::Line { start, end }) => {
             if let Some(st) = node.strokes.first() {
                 if st.width > 0.0 {
-                    if let ModelPaint::Solid(c) = &st.paint {
+                    if let ModelPaint::Solid(_) = &st.paint {
                         let line = kurbo::Line::new(
                             (start.x as f64, start.y as f64),
                             (end.x as f64, end.y as f64),
                         );
-                        stroke_shape(scene, screen, rgba8(c.to_rgba8(), 1.0), st.width as f64, &line);
+                        stroke_node(scene, screen, st, &line);
                     }
                 }
             }

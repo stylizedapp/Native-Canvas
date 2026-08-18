@@ -1,25 +1,54 @@
-import { Field, NumberField, SectionHeader } from "ds.slint";
+import { Field, NumberField, SectionHeader, Divider, ActionButton } from "ds.slint";
 import { Theme } from "../theme.slint";
 
-// Правая панель: параметры выделенного узла (Bento-карточка).
+// Правая панель: параметры выделения (Bento-карточка).
 // Commit полей — по Enter; тексты управляются из Rust (не затирают ввод).
+// При мультивыделении X/Y/W/H показывают общую рамку группы (ввод = дельта),
+// а свойства (Fill/Stroke/Opacity/Rotation/радиус) применяются ко всем.
 export component Inspector inherits Rectangle {
     in-out property <bool> has-selection: false;
-    in-out property <string> sel-name: "";
+    // Текст-плейсхолдер при мультивыделении (приходит из Rust).
+    in-out property <string> sel-hint: "";
     in-out property <string> sel-x-text: "";
     in-out property <string> sel-y-text: "";
     in-out property <string> sel-w-text: "";
     in-out property <string> sel-h-text: "";
+    in-out property <string> sel-rot-text: "";
     in-out property <string> sel-opacity-text: "";
     in-out property <string> sel-fill: "";
+    in-out property <color> sel-fill-preview: #00000000;
+    in-out property <string> sel-stroke: "";
+    in-out property <color> sel-stroke-preview: #00000000;
+    in-out property <bool> sel-stroke-dash: false;
+    in-out property <string> sel-stroke-width-text: "";
+    in-out property <string> sel-corner-tl-text: "";
+    in-out property <string> sel-corner-tr-text: "";
+    in-out property <string> sel-corner-br-text: "";
+    in-out property <string> sel-corner-bl-text: "";
+    in-out property <bool> is-frame: false;
+    in-out property <int> layout-mode: 0;
+    in-out property <string> sel-layout-gap: "";
+    in-out property <string> sel-layout-padding: "";
 
-    callback set-name(string);
-    callback set-x(string);
-    callback set-y(string);
-    callback set-w(string);
-    callback set-h(string);
-    callback set-opacity(string);
-    callback set-fill(string);
+    callback live-x(string);
+    callback live-y(string);
+    callback live-w(string);
+    callback live-h(string);
+    callback live-rot(string);
+    callback live-opacity(string);
+    callback live-fill(string);
+    callback live-stroke(string);
+    callback live-stroke-width(string);
+    callback live-corner(int, string);
+    callback open-picker();
+    callback open-stroke-picker();
+    callback toggle-stroke-dash();
+    callback scrub-delta(int, float);
+    callback set-layout-mode(int);
+    callback live-layout-gap(string);
+    callback live-layout-padding(string);
+    callback scrub-layout-gap(float);
+    callback scrub-layout-padding(float);
 
     background: Theme.surface;
     border-radius: Theme.radius-md;
@@ -37,30 +66,33 @@ export component Inspector inherits Rectangle {
             spacing: Theme.space-2;
 
             Text {
-                text: "Name";
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-            }
-            Field {
-                text: root.sel-name;
-                accepted(t) => { root.set-name(t); }
-            }
-
-            Text {
-                text: "Position";
+                text: "Position & Rotation";
                 color: Theme.text-muted;
                 font-size: Theme.font-xs;
             }
             NumberField {
                 label: "X";
                 value: root.sel-x-text;
-                set-value(t) => { root.set-x(t); }
+                edited(t) => { root.live-x(t); }
+                set-value(t) => { root.live-x(t); }
+                scrubbed(d) => { root.scrub-delta(0, d); }
             }
             NumberField {
                 label: "Y";
                 value: root.sel-y-text;
-                set-value(t) => { root.set-y(t); }
+                edited(t) => { root.live-y(t); }
+                set-value(t) => { root.live-y(t); }
+                scrubbed(d) => { root.scrub-delta(1, d); }
             }
+            NumberField {
+                label: "°";
+                value: root.sel-rot-text;
+                edited(t) => { root.live-rot(t); }
+                set-value(t) => { root.live-rot(t); }
+                scrubbed(d) => { root.scrub-delta(2, d); }
+            }
+
+            Divider {}
 
             Text {
                 text: "Size";
@@ -70,38 +102,213 @@ export component Inspector inherits Rectangle {
             NumberField {
                 label: "W";
                 value: root.sel-w-text;
-                set-value(t) => { root.set-w(t); }
+                edited(t) => { root.live-w(t); }
+                set-value(t) => { root.live-w(t); }
+                scrubbed(d) => { root.scrub-delta(3, d); }
             }
             NumberField {
                 label: "H";
                 value: root.sel-h-text;
-                set-value(t) => { root.set-h(t); }
+                edited(t) => { root.live-h(t); }
+                set-value(t) => { root.live-h(t); }
+                scrubbed(d) => { root.scrub-delta(4, d); }
             }
 
+            VerticalLayout {
+                visible: root.is-frame;
+                spacing: Theme.space-2;
+
+                Divider {}
+
+                Text {
+                    text: "Auto layout";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-1;
+                    ActionButton { horizontal-stretch: 1; text: "None"; checked: root.layout-mode == 0; clicked => { root.set-layout-mode(0); } }
+                    ActionButton { horizontal-stretch: 1; text: "Row"; checked: root.layout-mode == 1; clicked => { root.set-layout-mode(1); } }
+                    ActionButton { horizontal-stretch: 1; text: "Column"; checked: root.layout-mode == 2; clicked => { root.set-layout-mode(2); } }
+                }
+                NumberField {
+                    label: "Gap";
+                    value: root.sel-layout-gap;
+                    edited(t) => { root.live-layout-gap(t); }
+                    set-value(t) => { root.live-layout-gap(t); }
+                    scrubbed(d) => { root.scrub-layout-gap(d); }
+                }
+                NumberField {
+                    label: "Pad";
+                    value: root.sel-layout-padding;
+                    edited(t) => { root.live-layout-padding(t); }
+                    set-value(t) => { root.live-layout-padding(t); }
+                    scrubbed(d) => { root.scrub-layout-padding(d); }
+                }
+            }
+
+            Divider {}
+
             Text {
-                text: "Opacity";
+                text: "Appearance";
                 color: Theme.text-muted;
                 font-size: Theme.font-xs;
             }
             NumberField {
                 label: "%";
                 value: root.sel-opacity-text;
-                set-value(t) => { root.set-opacity(t); }
+                step: 1.0;
+                edited(t) => { root.live-opacity(t); }
+                set-value(t) => { root.live-opacity(t); }
+                scrubbed(d) => { root.scrub-delta(5, d); }
             }
+            Text {
+                text: "Corner radius (TL TR BR BL)";
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                NumberField {
+                    horizontal-stretch: 1;
+                    label: "TL";
+                    value: root.sel-corner-tl-text;
+                    edited(t) => { root.live-corner(0, t); }
+                    set-value(t) => { root.live-corner(0, t); }
+                    scrubbed(d) => { root.scrub-delta(7, d); }
+                }
+                NumberField {
+                    horizontal-stretch: 1;
+                    label: "TR";
+                    value: root.sel-corner-tr-text;
+                    edited(t) => { root.live-corner(1, t); }
+                    set-value(t) => { root.live-corner(1, t); }
+                    scrubbed(d) => { root.scrub-delta(8, d); }
+                }
+            }
+            HorizontalLayout {
+                spacing: Theme.space-1;
+                NumberField {
+                    horizontal-stretch: 1;
+                    label: "BR";
+                    value: root.sel-corner-br-text;
+                    edited(t) => { root.live-corner(2, t); }
+                    set-value(t) => { root.live-corner(2, t); }
+                    scrubbed(d) => { root.scrub-delta(9, d); }
+                }
+                NumberField {
+                    horizontal-stretch: 1;
+                    label: "BL";
+                    value: root.sel-corner-bl-text;
+                    edited(t) => { root.live-corner(3, t); }
+                    set-value(t) => { root.live-corner(3, t); }
+                    scrubbed(d) => { root.scrub-delta(10, d); }
+                }
+            }
+
+            Divider {}
 
             Text {
                 text: "Fill";
                 color: Theme.text-muted;
                 font-size: Theme.font-xs;
             }
-            Field {
-                text: root.sel-fill;
-                accepted(t) => { root.set-fill(t); }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    background: root.sel-fill-preview;
+                    touch := TouchArea {
+                        clicked => { root.open-picker(); }
+                    }
+                }
+                Field {
+                    horizontal-stretch: 1;
+                    text: root.sel-fill;
+                    edited(t) => { root.live-fill(t); }
+                    accepted(t) => { root.live-fill(t); }
+                }
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    background: touch.pressed ? Theme.surface-raised : Theme.surface;
+                    dots-touch := TouchArea {
+                        clicked => { root.open-picker(); }
+                        Text {
+                            text: "⋯";
+                            color: Theme.text;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            Divider {}
+
+            Text {
+                text: "Stroke";
+                color: Theme.text-muted;
+                font-size: Theme.font-xs;
+            }
+            HorizontalLayout {
+                spacing: Theme.space-2;
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: Theme.border-strong;
+                    background: root.sel-stroke-preview;
+                    stroke-touch := TouchArea {
+                        clicked => { root.open-stroke-picker(); }
+                    }
+                }
+                Field {
+                    horizontal-stretch: 1;
+                    text: root.sel-stroke;
+                    edited(t) => { root.live-stroke(t); }
+                    accepted(t) => { root.live-stroke(t); }
+                }
+                Rectangle {
+                    width: 30px;
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: root.sel-stroke-dash ? Theme.accent : Theme.border-strong;
+                    background: stroke-dots-touch.pressed ? Theme.surface-raised : Theme.surface;
+                    stroke-dots-touch := TouchArea {
+                        clicked => { root.toggle-stroke-dash(); }
+                        Text {
+                            text: "┅";
+                            color: Theme.text;
+                            font-size: Theme.font-sm;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+            NumberField {
+                label: "W";
+                value: root.sel-stroke-width-text;
+                step: 0.5;
+                edited(t) => { root.live-stroke-width(t); }
+                set-value(t) => { root.live-stroke-width(t); }
+                scrubbed(d) => { root.scrub-delta(6, d); }
             }
         }
 
         Text {
-            text: "Select a node";
+            text: root.sel-hint != "" ? root.sel-hint : "Select a node";
             color: Theme.text-faint;
             font-size: Theme.font-sm;
             visible: !root.has-selection;

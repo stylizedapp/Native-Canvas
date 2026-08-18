@@ -46,11 +46,12 @@ export component BentoColumn inherits VerticalLayout {
     @children
 }
 
-// Верхняя плашка приложения (название + статус + zoom/fps).
+// Верхняя плашка приложения (название + статус + zoom/fps + меню).
 export component TopBar inherits Rectangle {
     in property <string> zoom: "";
     in property <string> fps: "";
     in property <string> status: "";
+    callback menu-clicked();
 
     height: 40px;
     background: Theme.surface;
@@ -60,7 +61,7 @@ export component TopBar inherits Rectangle {
 
     HorizontalLayout {
         padding-left: Theme.space-4;
-        padding-right: Theme.space-4;
+        padding-right: Theme.space-2;
         spacing: Theme.space-3;
         Text {
             text: "NativeCanvas";
@@ -92,6 +93,25 @@ export component TopBar inherits Rectangle {
             font-weight: 700;
             font-size: Theme.font-sm;
             vertical-alignment: center;
+        }
+        // Кнопка главного меню (☰). Выпадающий список — оверлей в main.slint.
+        Rectangle {
+            width: 32px;
+            height: 28px;
+            border-radius: Theme.radius-sm;
+            background: touch.pressed ? Theme.surface-raised : Theme.surface;
+            border-width: 1px;
+            border-color: Theme.border;
+            touch := TouchArea {
+                clicked => { root.menu-clicked(); }
+                Text {
+                    text: "☰";
+                    color: Theme.text;
+                    font-size: Theme.font-md;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
         }
     }
 }
@@ -150,6 +170,7 @@ export component Field inherits Rectangle {
     in property <string> text: "";
     callback edited(string);
     callback accepted(string);
+    callback request-focus();
 
     height: 30px;
     border-radius: Theme.radius-sm;
@@ -157,6 +178,8 @@ export component Field inherits Rectangle {
     border-color: input.has-focus ? Theme.accent : Theme.border;
     background: Theme.bg;
     clip: true;
+
+    request-focus => { input.focus(); }
 
     VerticalLayout {
         padding-left: Theme.space-2;
@@ -173,23 +196,47 @@ export component Field inherits Rectangle {
 }
 
 // Строка «метка + числовое поле».
+// Перетаскивание по метке скрабит значение: `scrubbed(delta)` эмитится как
+// сдвиг относительно текущего значения, умноженный на `step`.
 export component NumberField inherits HorizontalLayout {
     in property <string> label: "";
     in property <string> value: "";
+    in property <float> step: 1.0;
+    callback edited(string);
     callback set-value(string);
+    callback scrubbed(float);
 
     spacing: Theme.space-2;
 
-    Text {
+    // Зона скраббинга: метка.
+    scrub := TouchArea {
         width: 24px;
-        text: root.label;
-        color: Theme.text-muted;
-        font-size: Theme.font-sm;
-        vertical-alignment: center;
+        height: 100%;
+        property <float> press-x: 0.0;
+        property <bool> scrubbing: false;
+
+        pointer-event(pe) => {
+            if pe.kind == PointerEventKind.down {
+                self.press-x = self.mouse-x / 1px;
+                self.scrubbing = true;
+            } else if pe.kind == PointerEventKind.move && self.scrubbing {
+                root.scrubbed((self.mouse-x / 1px - self.press-x) * root.step);
+            } else if pe.kind == PointerEventKind.up || pe.kind == PointerEventKind.cancel {
+                self.scrubbing = false;
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: Theme.text-muted;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
     }
     Field {
         horizontal-stretch: 1;
         text: root.value;
+        edited(t) => { root.edited(t); }
         accepted(t) => { root.set-value(t); }
     }
 }
