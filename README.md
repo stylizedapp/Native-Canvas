@@ -1,4 +1,4 @@
-# NativeCanvas
+# NativeCanvas | Pre-Release
 
 Легкий, быстрый и полностью автономный 2D-векторный редактор.
 
