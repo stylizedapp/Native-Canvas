@@ -4,6 +4,7 @@ mod app;
 mod config;
 mod crash;
 mod bench;
+mod gl_canvas;
 
 fn main() -> Result<(), slint::PlatformError> {
     // Микро-бенчмарки ядра: `native_canvas --bench` (без запуска GUI).

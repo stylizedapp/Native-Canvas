@@ -507,27 +507,51 @@ fn draw_filled(
     screen: kurbo::Affine,
     shape: &impl kurbo::Shape,
 ) {
-    if let Some(f) = solid_fill(node) {
-        if node.opacity > 0.0 {
+    // Эффективная альфа заливки и обводки (с учётом opacity узла).
+    let fill_a = solid_fill(node)
+        .map(|f| (f[3] as f32 * node.opacity).round().clamp(0.0, 255.0) as u8)
+        .unwrap_or(0);
+    let stroke_a = node
+        .strokes
+        .first()
+        .and_then(|st| match &st.paint {
+            ModelPaint::Solid(c) if st.width > 0.0 => Some(
+                (c.to_rgba8()[3] as f32 * node.opacity).round().clamp(0.0, 255.0) as u8,
+            ),
+            _ => None,
+        })
+        .unwrap_or(0);
+    // Fill alpha 0 и нет активной обводки: узел полностью невидим (без контура).
+    if fill_a == 0 && stroke_a == 0 {
+        return;
+    }
+    if fill_a > 0 {
+        if let Some(f) = solid_fill(node) {
             fill_shape(scene, screen, rgba8(f, node.opacity), shape);
         }
     }
-    if let Some(st) = node.strokes.first() {
-        if st.width > 0.0 {
+    if stroke_a > 0 {
+        if let Some(st) = node.strokes.first() {
             if let ModelPaint::Solid(_) = &st.paint {
-                stroke_node(scene, screen, st, shape);
+                stroke_node(scene, screen, st, node.opacity, shape);
             }
         }
     }
 }
 
 /// Обводка узла с учётом пунктира (dash в мировых координатах).
-fn stroke_node(scene: &mut VelloScene, t: kurbo::Affine, st: &ModelStroke, shape: &impl kurbo::Shape) {
+fn stroke_node(
+    scene: &mut VelloScene,
+    t: kurbo::Affine,
+    st: &ModelStroke,
+    opacity: f32,
+    shape: &impl kurbo::Shape,
+) {
     if st.width <= 0.0 {
         return;
     }
     let color = match &st.paint {
-        ModelPaint::Solid(c) => rgba8(c.to_rgba8(), 1.0),
+        ModelPaint::Solid(c) => rgba8(c.to_rgba8(), opacity),
         _ => return,
     };
     let mut stroke = Stroke {
@@ -577,7 +601,8 @@ fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
         }
         NodeKind::Text { .. } => {
             if let Some(f) = solid_fill(node) {
-                if node.opacity > 0.0 {
+                let a = (f[3] as f32 * node.opacity).round().clamp(0.0, 255.0) as u8;
+                if a > 0 {
                     let brush = Brush::Solid(rgba8(f, node.opacity));
                     for line in crate::engine::text::layout(&node.kind) {
                         for glyph in &line.glyphs {
@@ -590,12 +615,17 @@ fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
         NodeKind::Shape(ShapeKind::Line { start, end }) => {
             if let Some(st) = node.strokes.first() {
                 if st.width > 0.0 {
-                    if let ModelPaint::Solid(_) = &st.paint {
-                        let line = kurbo::Line::new(
-                            (start.x as f64, start.y as f64),
-                            (end.x as f64, end.y as f64),
-                        );
-                        stroke_node(scene, screen, st, &line);
+                    if let ModelPaint::Solid(c) = &st.paint {
+                        let sa = (c.to_rgba8()[3] as f32 * node.opacity)
+                            .round()
+                            .clamp(0.0, 255.0) as u8;
+                        if sa > 0 {
+                            let line = kurbo::Line::new(
+                                (start.x as f64, start.y as f64),
+                                (end.x as f64, end.y as f64),
+                            );
+                            stroke_node(scene, screen, st, node.opacity, &line);
+                        }
                     }
                 }
             }

@@ -2909,6 +2909,7 @@ dependencies = [
  "ab_glyph",
  "dirs",
  "glam",
+ "glow",
  "instant",
  "kurbo",
  "pollster",

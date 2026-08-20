@@ -154,9 +154,12 @@ export component IconButton inherits Rectangle {
     in property <image> icon;
     in property <string> tooltip: "";
     in property <bool> active: false;
+    // Размер квадратной кнопки (иконка центрируется внутри).
+    in property <length> btn-size: 32px;
     callback clicked();
 
-    height: 32px;
+    width: root.btn-size;
+    height: root.btn-size;
     border-radius: Theme.radius-sm;
     background: root.active ? Theme.accent : (touch.pressed ? Theme.surface-raised : Theme.surface);
     border-width: 1px;
@@ -242,6 +245,9 @@ export component Field inherits Rectangle {
 // сдвиг относительно текущего значения, умноженный на `step`.
 export component NumberField inherits HorizontalLayout {
     in property <string> label: "";
+    // Иконка вместо текстовой метки (скраббинг по ней так же работает).
+    in property <image> icon;
+    in property <bool> show-icon: false;
     in property <string> value: "";
     in property <float> step: 1.0;
     in property <string> tooltip-hint: "";
@@ -251,9 +257,9 @@ export component NumberField inherits HorizontalLayout {
 
     spacing: Theme.space-2;
 
-    // Зона скраббинга: метка. Ctrl = точнее (×0.1), Shift = грубее (×2).
+    // Зона скраббинга: метка (текст или иконка). Ctrl = точнее (×0.1), Shift = грубее (×2).
     scrub := TouchArea {
-        width: 24px;
+        width: root.show-icon ? 28px : 24px;
         height: 100%;
         property <float> press-x: 0.0;
         property <bool> scrubbing: false;
@@ -278,12 +284,20 @@ export component NumberField inherits HorizontalLayout {
 
 Tooltip { text: @markdown("\{root.tooltip-hint}"); }
 
-        Text {
+        if !root.show-icon : Text {
             text: root.label;
             color: Theme.text-muted;
             font-family: Theme.font-family;
             font-size: Theme.font-sm;
             vertical-alignment: center;
+        }
+        if root.show-icon : Image {
+            width: 16px;
+            height: 16px;
+            source: root.icon;
+            colorize: Theme.text-muted;
+            x: (scrub.width - 16px) / 2;
+            y: (scrub.height - 16px) / 2;
         }
     }
     Field {

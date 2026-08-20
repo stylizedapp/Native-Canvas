@@ -18,7 +18,39 @@ use slint::{ComponentHandle, ModelRc, VecModel};
 use slotmap::{Key, KeyData};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Троттлинг `render()` при движении мыши: позиция контроллера обновляется на
+/// каждое событие, а отрисовка — не чаще ~60 Гц. Лишние кадры коалесцятся в
+/// один по таймеру, поэтому финальная позиция курсора не теряется.
+struct MoveThrottle {
+    last_render: Instant,
+    pending: bool,
+    timer: slint::Timer,
+}
+
+impl MoveThrottle {
+    fn new() -> Self {
+        Self {
+            last_render: Instant::now() - Duration::from_millis(100),
+            pending: false,
+            timer: slint::Timer::default(),
+        }
+    }
+
+    fn request(&mut self, render: &Rc<dyn Fn()>) {
+        let now = Instant::now();
+        if now.duration_since(self.last_render) >= Duration::from_millis(16) {
+            self.pending = false;
+            self.timer.stop();
+            self.last_render = now;
+            render();
+        } else if !self.pending {
+            self.pending = true;
+            self.timer.restart();
+        }
+    }
+}
 
 pub fn run() -> Result<(), slint::PlatformError> {
     let window = crate::ui::AppWindow::new()?;
@@ -173,6 +205,24 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let weak = window.as_weak();
         let controller = controller.clone();
         let render = render.clone();
+        // Троттлинг: рендер не чаще ~60 Гц, коалесцинг через одноразовый таймер.
+        let throttle: Rc<RefCell<MoveThrottle>> = Rc::new(RefCell::new(MoveThrottle::new()));
+        {
+            let weak = Rc::downgrade(&throttle);
+            let render = render.clone();
+            throttle.borrow_mut().timer.start(
+                slint::TimerMode::SingleShot,
+                Duration::from_millis(8),
+                move || {
+                    if let Some(t) = weak.upgrade() {
+                        let mut t = t.borrow_mut();
+                        t.last_render = Instant::now();
+                        t.pending = false;
+                        render();
+                    }
+                },
+            );
+        }
         window.on_pointer_move(move |_button, x, y| {
             let screen = Vec2::new(x, y);
             controller.borrow_mut().pointer_move(screen);
@@ -185,7 +235,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     w.set_hovered_handle(handle.into());
                 }
             }
-            render();
+            throttle.borrow_mut().request(&render);
         });
     }
     {
@@ -228,15 +278,12 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let controller = controller.clone();
         let state = state.clone();
         let render = render.clone();
-        window.on_drop_layer(move |id, y| {
+        window.on_drop_layer(move |id, zone| {
             let dragged = state.borrow_mut().dragged_layer.take();
             if let Some(d) = dragged {
-                let key = NodeKey::from(KeyData::from_ffi(id as u32 as u64));
-                if d != key {
-                    let offset = ((y - 14.0) / 28.0).round() as i32;
-                    controller.borrow_mut().move_layer(d, offset);
-                    render();
-                }
+                let target = NodeKey::from(KeyData::from_ffi(id as u32 as u64));
+                controller.borrow_mut().drop_layer_at(d, target, zone as u8);
+                render();
             }
         });
     }
@@ -972,6 +1019,9 @@ pub fn run() -> Result<(), slint::PlatformError> {
 
     // --- Инспектор ---
     register_inspector_callbacks(&window, &controller, &state, &render);
+
+    // --- GPU-презентация канваса: персистентная GL-текстура (fix 30 FPS) ---
+    crate::gl_canvas::install(&window, &state);
 
     window.run()
 }

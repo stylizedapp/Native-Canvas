@@ -256,9 +256,9 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pix
     // Текст: заливка векторных контуров глифов (уже в локальных координатах
     // узла, мировая трансформация применится через `combined`).
     if let NodeKind::Text { .. } = &node.kind {
-        if node.opacity > 0.0 {
-            if let Some(f) = solid_fill(node) {
-                let a = (f[3] as f32 * node.opacity).round() as u8;
+        if let Some(f) = solid_fill(node) {
+            let a = (f[3] as f32 * node.opacity).round() as u8;
+            if a > 0 {
                 let mut paint = Paint::default();
                 paint.set_color_rgba8(f[0], f[1], f[2], a);
                 paint.anti_alias = true;
@@ -291,30 +291,47 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pix
     };
 
     // Заливка (первая сплошная; градиенты пока игнорируются).
-    if let Some(f) = solid_fill(node) {
-        if node.opacity > 0.0 {
-            let a = (f[3] as f32 * node.opacity).round() as u8;
-            let mut paint = Paint::default();
-            paint.set_color_rgba8(f[0], f[1], f[2], a);
-            paint.anti_alias = true;
-            match plain_rect {
-                Some(r) => pixmap.fill_rect(r, &paint, combined, None),
-                None => {
-                    if let Some(path) = build_node_path(&node.kind) {
-                        pixmap.fill_path(&path, &paint, FillRule::Winding, combined, None);
-                    }
+    let fill_a = solid_fill(node)
+        .map(|f| (f[3] as f32 * node.opacity).round() as u8)
+        .unwrap_or(0);
+    // Активная обводка: ширина > 0, сплошная и эффективная альфа > 0.
+    let stroke_a = node
+        .strokes
+        .first()
+        .and_then(|st| match &st.paint {
+            ModelPaint::Solid(c) if st.width > 0.0 => {
+                let sc8 = c.to_rgba8();
+                Some((sc8[3] as f32 * node.opacity).round() as u8)
+            }
+            _ => None,
+        })
+        .unwrap_or(0);
+    // Fill alpha 0 и нет активной обводки: узел полностью невидим (без контура).
+    if fill_a == 0 && stroke_a == 0 {
+        return;
+    }
+    if fill_a > 0 {
+        let f = solid_fill(node).unwrap();
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(f[0], f[1], f[2], fill_a);
+        paint.anti_alias = true;
+        match plain_rect {
+            Some(r) => pixmap.fill_rect(r, &paint, combined, None),
+            None => {
+                if let Some(path) = build_node_path(&node.kind) {
+                    pixmap.fill_path(&path, &paint, FillRule::Winding, combined, None);
                 }
             }
         }
     }
     // Обводка.
-    if let Some(st) = node.strokes.first() {
-        if st.width > 0.0 {
+    if stroke_a > 0 {
+        if let Some(st) = node.strokes.first() {
             if let ModelPaint::Solid(c) = &st.paint {
                 let sc8 = c.to_rgba8();
                 let scale = world.matrix2.x_axis.length().max(world.matrix2.y_axis.length());
                 let mut sp = Paint::default();
-                sp.set_color_rgba8(sc8[0], sc8[1], sc8[2], sc8[3]);
+                sp.set_color_rgba8(sc8[0], sc8[1], sc8[2], stroke_a);
                 sp.anti_alias = true;
                 let sk = SkStroke {
                     width: st.width * scale,
@@ -672,5 +689,82 @@ mod tests {
             }
         }
         assert!(dark > 4, "тёмных пикселей в колонке глифа: {dark}");
+    }
+
+    #[test]
+    fn transparent_fill_without_stroke_is_invisible() {
+        // Заливка прозрачна (alpha 0) и обводки нет: узел не рисуется вовсе
+        // (раньше такой узел рисовал невидимую фигуру, затирая то, что под ним).
+        let mut s = SceneGraph::new();
+        let k = s.insert_root(
+            "R",
+            NodeKind::Shape(ShapeKind::Rectangle {
+                size: Vec2::new(40.0, 30.0),
+                corner_radii: [0.0; 4],
+            }),
+        );
+        if let Some(n) = s.get_mut(k) {
+            n.fills.push(ModelPaint::Solid(ModelColor::from_rgba8(255, 0, 0, 0)));
+        }
+        s.mark_subtree_dirty(k);
+        s.flush_transforms();
+        let buf = render_scene(&s);
+        assert_eq!(pixel(&buf, 160, 20, 15), PAGE_BG);
+    }
+
+    #[test]
+    fn transparent_fill_still_shows_stroke() {
+        // Прозрачная заливка + видимая обводка: узел рисуется, но только обводкой.
+        let mut s = SceneGraph::new();
+        let k = s.insert_root(
+            "R",
+            NodeKind::Shape(ShapeKind::Rectangle {
+                size: Vec2::new(40.0, 30.0),
+                corner_radii: [0.0; 4],
+            }),
+        );
+        if let Some(n) = s.get_mut(k) {
+            n.fills.push(ModelPaint::Solid(ModelColor::from_rgba8(255, 0, 0, 0)));
+            n.strokes.push(crate::engine::model::types::Stroke::solid(ModelColor::BLACK, 8.0));
+        }
+        s.mark_subtree_dirty(k);
+        s.flush_transforms();
+        let buf = render_scene(&s);
+        // Центр — прозрачная заливка → страница; у левой кромки — чёрная обводка.
+        assert_eq!(pixel(&buf, 160, 20, 15), PAGE_BG);
+        let [r, g, b, a] = pixel(&buf, 160, 2, 15);
+        assert_eq!(a, 255);
+        assert!(
+            r < 26 && g < 26 && b < 26,
+            "обводка должна затемнять страницу: {r},{g},{b}"
+        );
+    }
+
+    #[test]
+    fn stroke_alpha_respects_node_opacity() {
+        // Alpha обводки умножается на opacity узла: 50% чёрного поверх тёмной
+        // страницы — заметно темнее, но не чисто чёрная.
+        let mut s = SceneGraph::new();
+        let k = s.insert_root(
+            "R",
+            NodeKind::Shape(ShapeKind::Rectangle {
+                size: Vec2::new(40.0, 30.0),
+                corner_radii: [0.0; 4],
+            }),
+        );
+        if let Some(n) = s.get_mut(k) {
+            n.fills.push(ModelPaint::Solid(ModelColor::from_rgba8(255, 0, 0, 0)));
+            n.strokes.push(crate::engine::model::types::Stroke::solid(ModelColor::BLACK, 8.0));
+            n.opacity = 0.5;
+        }
+        s.mark_subtree_dirty(k);
+        s.flush_transforms();
+        let buf = render_scene(&s);
+        let [r, g, b, a] = pixel(&buf, 160, 2, 15);
+        assert_eq!(a, 255);
+        assert!(
+            r > 0 && r < 20 && g > 0 && g < 20 && b > 0 && b < 20,
+            "rgb = {r},{g},{b}"
+        );
     }
 }

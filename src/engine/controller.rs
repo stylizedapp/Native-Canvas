@@ -77,6 +77,12 @@ impl Drag {
     }
 }
 
+/// Трансформация с сохранённым поворотом/масштабом и новой трансляцией:
+/// перенос/позиционирование не сбрасывает rotation/scale узла.
+fn translate_keep_rotation(cur: Affine2, t: Vec2) -> Affine2 {
+    Affine2::from_cols(cur.matrix2.x_axis, cur.matrix2.y_axis, t)
+}
+
 /// Контроллер холста: связывает граф сцены, камеру, инструменты и историю.
 pub struct CanvasController {
     pub scene: SceneGraph,
@@ -941,7 +947,11 @@ impl CanvasController {
                 d.last_world = world;
                 // Снап к итоговой позиции: без дрейфа, т.к. база — start_pos.
                 let target = self.snap_point(d.start_pos + (world - d.grab_world));
-                self.scene.set_transform(*key, Affine2::from_translation(target));
+                // Перенос сохраняет поворот/масштаб узла (не сбрасывает matrix2).
+                if let Some(n) = self.scene.get_mut(*key) {
+                    n.local_transform = translate_keep_rotation(n.local_transform, target);
+                }
+                self.scene.mark_subtree_dirty(*key);
                 // Подсветка фрейма-цели (reparent по отпусканию).
                 self.hovered_frame = self.drop_frame_at(world, &[*key]);
                 self.touch();
@@ -954,7 +964,10 @@ impl CanvasController {
                 let delta = self.snap_point(world) - d.grab_world;
                 for (i, &k) in keys.iter().enumerate() {
                     let target = d.start_positions[i] + delta;
-                    self.scene.set_transform(k, Affine2::from_translation(target));
+                    if let Some(n) = self.scene.get_mut(k) {
+                        n.local_transform = translate_keep_rotation(n.local_transform, target);
+                    }
+                    self.scene.mark_subtree_dirty(k);
                 }
                 // Подсветка фрейма-цели (reparent по отпусканию).
                 self.hovered_frame = self.drop_frame_at(world, keys);
@@ -1157,7 +1170,7 @@ impl CanvasController {
     fn apply_position(&mut self, x: f32, y: f32) {
         let snapped = self.snap_point(Vec2::new(x, y));
         self.apply_selected(false, |n| {
-            n.local_transform = Affine2::from_translation(snapped);
+            n.local_transform = translate_keep_rotation(n.local_transform, snapped);
         });
     }
 
@@ -1563,6 +1576,52 @@ impl CanvasController {
         }
     }
 
+    /// Figma-стиль drop в панели слоёв. `zone`: 0 = вставить ПЕРЕД `target`
+    /// (тот же уровень), 1 = вложить ВНУТРЬ `target`, 2 = вставить ПОСЛЕ.
+    /// При переносе между уровнями мировая позиция сохраняется.
+    pub fn drop_layer_at(&mut self, dragged: NodeKey, target: NodeKey, zone: u8) {
+        if dragged == target || !self.scene.contains(dragged) || !self.scene.contains(target) {
+            return;
+        }
+        // Цель (или её родитель) не может быть потомком переносимого узла —
+        // иначе получится цикл.
+        if self.scene.is_descendant(target, dragged) {
+            return;
+        }
+        self.record();
+        if zone == 1 {
+            // Вложить внутрь target.
+            self.scene.reparent_preserve_world(dragged, Some(target));
+            self.scene.flush_transforms();
+            self.bump_revision();
+            return;
+        }
+        // Переместить в список сиблингов target и вставить до/после него.
+        let parent = self.scene.get(target).and_then(|n| n.parent);
+        if let Some(p) = parent {
+            if self.scene.is_descendant(p, dragged) {
+                return;
+            }
+        }
+        if self.scene.get(dragged).and_then(|n| n.parent) != parent {
+            self.scene.reparent_preserve_world(dragged, parent);
+            self.scene.flush_transforms();
+        }
+        // Оба теперь в одном списке: позиция target после удаления dragged.
+        let siblings = self.scene.siblings_of(target);
+        let mut ti = siblings.iter().position(|&k| k == target).unwrap_or(0);
+        if let Some(di) = siblings.iter().position(|&k| k == dragged) {
+            if di < ti {
+                ti -= 1;
+            }
+        }
+        let ni = if zone == 0 { ti } else { ti + 1 };
+        if self.scene.move_to_index(dragged, ni) {
+            self.scene.mark_subtree_dirty(dragged);
+        }
+        self.bump_revision();
+    }
+
     /// Сдвигает всё выделение на одну позицию вверх по z-order (поверх).
     /// Идём сверху вниз, чтобы более ранние сдвиги не сбивали позиции.
     pub fn bring_forward_selection(&mut self) {
@@ -1652,7 +1711,7 @@ impl CanvasController {
             _ => false,
         };
         if is_size_kind {
-            n.local_transform = Affine2::from_translation(mn);
+            n.local_transform = translate_keep_rotation(n.local_transform, mn);
         } else {
             n.local_transform = gizmo::scale_transform(mn, mn + size, lmin, lmax);
         }
@@ -2638,5 +2697,189 @@ mod tests {
         } else {
             panic!("не Text");
         }
+    }
+
+    // --- Поворот сохраняется при переносе/ресайзе/вводе позиции ---
+
+    fn rotation_of(c: &CanvasController, key: NodeKey) -> f32 {
+        let n = c.scene.get(key).unwrap();
+        n.local_transform.matrix2.x_axis.y.atan2(n.local_transform.matrix2.x_axis.x).to_degrees()
+    }
+
+    #[test]
+    fn move_drag_preserves_rotation() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        // Свой узел без пересечений с демо-контентом (демо-фрейм перекрыт
+        // прямоугольником/эллипсом, и центр его AABB попадает в них).
+        let key = c.scene.insert_root(
+            "R",
+            NodeKind::Shape(ShapeKind::Rectangle {
+                size: Vec2::new(100.0, 100.0),
+                corner_radii: [0.0; 4],
+            }),
+        );
+        c.scene.set_selection(vec![key]);
+        c.scene.flush_transforms();
+        c.apply_rotation_live(30.0);
+        c.scene.flush_transforms();
+        assert!((rotation_of(&c, key) - 30.0).abs() < 1e-3);
+
+        // Драг за центр узла: позиция меняется, поворот сохраняется.
+        let start = c.camera.world_to_screen(Vec2::new(50.0, 50.0));
+        let end = start + Vec2::new(40.0, 25.0);
+        let t0 = c.scene.get(key).unwrap().local_transform.translation;
+        c.pointer_down(start, 1);
+        assert!(
+            matches!(&c.drag.as_ref().unwrap().mode, DragMode::Move { .. }),
+            "драг должен быть Move"
+        );
+        c.pointer_move(end);
+        c.scene.flush_transforms();
+        let n = c.scene.get(key).unwrap();
+        assert!(
+            (rotation_of(&c, key) - 30.0).abs() < 1e-3,
+            "поворот сброшен при Move: {}",
+            rotation_of(&c, key)
+        );
+        let delta = n.local_transform.translation - t0;
+        // snap_point всегда округляет до целых пикселей (даже без сетки).
+        assert!(
+            (delta.x - 40.0).abs() < 0.6 && (delta.y - 25.0).abs() < 0.6,
+            "сдвиг: {delta:?}"
+        );
+        c.pointer_up(end);
+    }
+
+    #[test]
+    fn move_many_preserves_rotation() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        c.scene.flush_transforms();
+        let a = c.scene.roots()[0];
+        let b = c.scene.roots()[1];
+        c.scene.set_selection(vec![a, b]);
+        c.apply_rotation_live(45.0);
+        c.scene.flush_transforms();
+
+        // Точка (100,100) лежит только в a — драг начнётся как MoveMany.
+        let start = c.camera.world_to_screen(Vec2::new(100.0, 100.0));
+        let end = start + Vec2::new(30.0, 20.0);
+        c.pointer_down(start, 1);
+        assert!(
+            matches!(&c.drag.as_ref().unwrap().mode, DragMode::MoveMany { .. }),
+            "драг по выделенному узлу при мультивыборе должен быть MoveMany"
+        );
+        c.pointer_move(end);
+        c.scene.flush_transforms();
+        for k in [a, b] {
+            assert!(
+                (rotation_of(&c, k) - 45.0).abs() < 1e-3,
+                "поворот сброшен при MoveMany: {}",
+                rotation_of(&c, k)
+            );
+        }
+        c.pointer_up(end);
+    }
+
+    #[test]
+    fn resize_drag_preserves_rotation() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        c.scene.flush_transforms();
+        let key = c.scene.roots()[0]; // Frame — size-kind.
+        c.select(key);
+        c.apply_rotation_live(90.0);
+        c.scene.flush_transforms();
+
+        // Драг за SE-хэндол: размер меняется, поворот сохраняется.
+        let (_, mx) = c.scene.world_bbox(key).unwrap();
+        let se = c.camera.world_to_screen(mx);
+        c.pointer_down(se, 1);
+        assert!(
+            matches!(&c.drag.as_ref().unwrap().mode, DragMode::Resize { handle: Handle::Se, .. }),
+            "SE-хэндол должен начать ресайз"
+        );
+        let size_before = match &c.scene.get(key).unwrap().kind {
+            NodeKind::Frame { size, .. } => *size,
+            _ => panic!("ожидался фрейм"),
+        };
+        c.pointer_move(se + Vec2::new(30.0, 20.0));
+        c.scene.flush_transforms();
+        let n = c.scene.get(key).unwrap();
+        assert!(
+            (rotation_of(&c, key) - 90.0).abs() < 1e-3,
+            "поворот сброшен при ресайзе: {}",
+            rotation_of(&c, key)
+        );
+        let size_after = match &n.kind {
+            NodeKind::Frame { size, .. } => *size,
+            _ => panic!("ожидался фрейм"),
+        };
+        assert!(size_after != size_before, "размер должен измениться");
+    }
+
+    #[test]
+    fn position_field_preserves_rotation() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        let key = c.scene.roots()[0];
+        c.select(key);
+        c.apply_rotation_live(60.0);
+        c.scene.flush_transforms();
+        c.apply_position_live(50.0, 70.0);
+        let n = c.scene.get(key).unwrap();
+        assert!(
+            (rotation_of(&c, key) - 60.0).abs() < 1e-3,
+            "поворот сброшен при вводе позиции: {}",
+            rotation_of(&c, key)
+        );
+        assert!((n.local_transform.translation.x - 50.0).abs() < 1e-3);
+        assert!((n.local_transform.translation.y - 70.0).abs() < 1e-3);
+    }
+
+    // --- Drag&drop в панели слоёв ---
+
+    #[test]
+    fn drop_layer_at_nests_into_frame() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        let rect = c.scene.roots()[1];
+        c.drop_layer_at(rect, frame, 1);
+        assert_eq!(c.scene.get(rect).unwrap().parent, Some(frame));
+        c.scene.flush_transforms();
+        // Мировая позиция сохраняется при вложении (пересчёт в локальную).
+        let (mn, _) = c.scene.world_bbox(rect).unwrap();
+        assert!((mn.x - 120.0).abs() < 1e-3 && (mn.y - 130.0).abs() < 1e-3, "mn: {mn:?}");
+    }
+
+    #[test]
+    fn drop_layer_at_reorders_before_after() {
+        let mut c = CanvasController::new();
+        let a = c.scene.roots()[0];
+        let b = c.scene.roots()[1];
+        let ell = c.scene.roots()[2];
+        // Зона 0 — вставка ДО цели: ell уходит наверх.
+        c.drop_layer_at(ell, a, 0);
+        let roots = c.scene.roots();
+        assert_eq!(roots, vec![ell, a, b]);
+        // Зона 2 — вставка ПОСЛЕ цели: b встаёт сразу за ell.
+        c.drop_layer_at(b, ell, 2);
+        let roots = c.scene.roots();
+        assert_eq!(roots, vec![ell, b, a]);
+    }
+
+    #[test]
+    fn drop_layer_at_rejects_cycle() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        let rect = c.scene.roots()[1];
+        c.drop_layer_at(rect, frame, 1);
+        assert_eq!(c.scene.get(rect).unwrap().parent, Some(frame));
+        // Фрейм — предок rect: вложение и вставка рядом с ним создали бы цикл.
+        c.drop_layer_at(frame, rect, 1);
+        assert_eq!(c.scene.get(frame).unwrap().parent, None, "цикл должен быть отклонён");
+        c.drop_layer_at(frame, rect, 0);
+        assert_eq!(c.scene.get(frame).unwrap().parent, None);
     }
 }

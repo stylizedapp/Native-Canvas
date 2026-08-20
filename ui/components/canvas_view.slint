@@ -158,11 +158,11 @@ export component CanvasView inherits Rectangle {
         }
     }
 
-    // Плавающая панель инструментов: по центру сверху, поверх холста.
-    // Ширина 240px захардкожена и должна совпадать с Toolbar (7 кнопок).
+    // Плавающая панель инструментов: по центру снизу, 20px от нижней кромки.
+    // Ширина 284px захардкожена и должна совпадать с Toolbar (7 кнопок × 36px).
     Toolbar {
-        x: (root.width - 240px) / 2;
-        y: Theme.space-2;
+        x: (root.width - 284px) / 2;
+        y: root.height - 44px - 20px;
         active-tool: root.active-tool;
         tool-selected(t) => { root.tool-selected(t); }
     }

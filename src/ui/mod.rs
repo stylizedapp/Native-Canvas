@@ -82,6 +82,15 @@ pub struct CanvasState {
     pub editing_key: Option<NodeKey>,
     /// Зажат пробел (Space+Drag = временный Pan).
     pub space_held: bool,
+    // GPU-презентация канваса (персистентная GL-текстура, см. `crate::gl_canvas`).
+    /// Новый буфер отрисован и готов к заливке в GL-текстуру в BeforeRendering.
+    pub present_pending: bool,
+    /// Персистентная GL-текстура создана и свойство canvas-texture выставлено.
+    pub gl_ready: bool,
+    // Метрики презентации (для debug-оверлея).
+    pub gl_present_us: u128,
+    pub gl_frame_us: u128,
+    pub gl_frame_gap_us: u128,
 }
 
 /// Индексы полей инспектора в `sel_edited_at` и диф-кэше.
@@ -150,6 +159,11 @@ impl CanvasState {
             context_target: None,
             editing_key: None,
             space_held: false,
+            present_pending: false,
+            gl_ready: false,
+            gl_present_us: 0,
+            gl_frame_us: 0,
+            gl_frame_gap_us: 0,
         }
     }
 
@@ -296,8 +310,16 @@ pub fn sync(
         st.fps_window = now;
     }
 
-    w.set_canvas_texture(Image::from_rgba8(st.images[next].clone()));
+    // Презентация: persistent GL-текстура (быстрый путь — только request_redraw,
+    // upload делает BeforeRendering). Fallback на from_rgba8 — пока текстура не
+    // создана или бэкенд не GL (служит и первичным триггером редрава).
+    st.present_pending = true;
     st.cur = next;
+    if st.gl_ready {
+        w.window().request_redraw();
+    } else {
+        w.set_canvas_texture(Image::from_rgba8(st.images[next].clone()));
+    }
 
     // Верхняя плашка — только при изменении.
     let zoom = format!("{:.0}%", c.camera.zoom * 100.0);
@@ -348,6 +370,7 @@ pub fn sync(
         st.last_sel_corner_tr.clear();
         st.last_sel_corner_br.clear();
         st.last_sel_corner_bl.clear();
+        st.last_sel_corner_text.clear();
         st.sel_edited_at = [None; 17];
     }
     // Одиночный выбор — обычные поля; мультивыбор — X/Y/W/H показывают общую
@@ -369,7 +392,7 @@ pub fn sync(
                 )
             };
             w.set_has_selection(true);
-            update_sel(&w, n, &mut st, xywh);
+            update_sel(&w, n, &mut st, xywh, sel_len > 1);
         }
         _ => w.set_has_selection(false),
     }
@@ -391,7 +414,8 @@ pub fn sync(
              Camera pan({:.0},{:.0}) zoom {:.2}\n\
              Tool: {}  |  Revision: {}\n\
              Grid: {}  |  Snap: {}  |  Step: {}\n\
-             Backend: {}",
+             Backend: {}\n\
+             GL: present {:.3} ms  |  frame {:.3} ms  |  gap {:.3} ms",
             st.fps,
             st.last_render_us as f64 / 1000.0,
             c.scene.len(),
@@ -407,6 +431,9 @@ pub fn sync(
             if c.grid.snap { "on" } else { "off" },
             c.grid.step,
             renderer.borrow().name(),
+            st.gl_present_us as f64 / 1000.0,
+            st.gl_frame_us as f64 / 1000.0,
+            st.gl_frame_gap_us as f64 / 1000.0,
         )
         .into(),
     );
@@ -1308,7 +1335,13 @@ fn upd_field(
 /// Диф-обновление полей инспектора из узла (живой отклик при драге,
 /// без затирания полей, которые пользователь сейчас редактирует).
 /// `xywh` — отображаемые X/Y/W/H (для мультивыбора — общая рамка группы).
-fn update_sel(w: &AppWindow, n: &SceneNode, st: &mut CanvasState, xywh: (f32, f32, f32, f32)) {
+fn update_sel(
+    w: &AppWindow,
+    n: &SceneNode,
+    st: &mut CanvasState,
+    xywh: (f32, f32, f32, f32),
+    multi: bool,
+) {
     let now = Instant::now();
     upd_field(w, &mut st.last_sel_x, &mut st.sel_edited_at[SelField::X as usize], now, fmt_num(xywh.0), AppWindow::set_sel_x_text);
     upd_field(w, &mut st.last_sel_y, &mut st.sel_edited_at[SelField::Y as usize], now, fmt_num(xywh.1), AppWindow::set_sel_y_text);
@@ -1324,7 +1357,14 @@ fn update_sel(w: &AppWindow, n: &SceneNode, st: &mut CanvasState, xywh: (f32, f3
     w.set_sel_stroke_dash(sel_stroke_dashed(n));
     let sw = n.strokes.first().map(|s| s.width).unwrap_or(0.0);
     upd_field(w, &mut st.last_sel_stroke_width, &mut st.sel_edited_at[SelField::StrokeWidth as usize], now, fmt_num(sw), AppWindow::set_sel_stroke_width_text);
-    if let Some(r) = sel_corners(n) {
+    if multi {
+        // Мультивыбор: углы не показываем (значение первого узла нерелевантно).
+        upd_field(w, &mut st.last_sel_corner_tl, &mut st.sel_edited_at[SelField::CornerTL as usize], now, "0".into(), AppWindow::set_sel_corner_tl_text);
+        upd_field(w, &mut st.last_sel_corner_tr, &mut st.sel_edited_at[SelField::CornerTR as usize], now, "0".into(), AppWindow::set_sel_corner_tr_text);
+        upd_field(w, &mut st.last_sel_corner_br, &mut st.sel_edited_at[SelField::CornerBR as usize], now, "0".into(), AppWindow::set_sel_corner_br_text);
+        upd_field(w, &mut st.last_sel_corner_bl, &mut st.sel_edited_at[SelField::CornerBL as usize], now, "0".into(), AppWindow::set_sel_corner_bl_text);
+        upd_field(w, &mut st.last_sel_corner_text, &mut st.sel_edited_at[SelField::CornerUniform as usize], now, "0".into(), AppWindow::set_sel_corner_text);
+    } else if let Some(r) = sel_corners(n) {
         upd_field(w, &mut st.last_sel_corner_tl, &mut st.sel_edited_at[SelField::CornerTL as usize], now, fmt_num(r[0]), AppWindow::set_sel_corner_tl_text);
         upd_field(w, &mut st.last_sel_corner_tr, &mut st.sel_edited_at[SelField::CornerTR as usize], now, fmt_num(r[1]), AppWindow::set_sel_corner_tr_text);
         upd_field(w, &mut st.last_sel_corner_br, &mut st.sel_edited_at[SelField::CornerBR as usize], now, fmt_num(r[2]), AppWindow::set_sel_corner_br_text);
@@ -1410,7 +1450,7 @@ fn update_sel(w: &AppWindow, n: &SceneNode, st: &mut CanvasState, xywh: (f32, f3
 
 /// Заполняет поля инспектора из узла (после commit; `xywh` — отображаемые
 /// X/Y/W/H, для мультивыбора — общая рамка группы).
-fn set_sel_texts(w: &AppWindow, n: &SceneNode, xywh: (f32, f32, f32, f32)) {
+fn set_sel_texts(w: &AppWindow, n: &SceneNode, xywh: (f32, f32, f32, f32), multi: bool) {
     w.set_sel_x_text(fmt_num(xywh.0).into());
     w.set_sel_y_text(fmt_num(xywh.1).into());
     w.set_sel_w_text(fmt_num(xywh.2).into());
@@ -1425,7 +1465,12 @@ fn set_sel_texts(w: &AppWindow, n: &SceneNode, xywh: (f32, f32, f32, f32)) {
     w.set_sel_stroke_dash(sel_stroke_dashed(n));
     let sw = n.strokes.first().map(|s| s.width).unwrap_or(0.0);
     w.set_sel_stroke_width_text(fmt_num(sw).into());
-    if let Some(r) = sel_corners(n) {
+    if multi {
+        w.set_sel_corner_tl_text("0".into());
+        w.set_sel_corner_tr_text("0".into());
+        w.set_sel_corner_br_text("0".into());
+        w.set_sel_corner_bl_text("0".into());
+    } else if let Some(r) = sel_corners(n) {
         w.set_sel_corner_tl_text(fmt_num(r[0]).into());
         w.set_sel_corner_tr_text(fmt_num(r[1]).into());
         w.set_sel_corner_br_text(fmt_num(r[2]).into());
@@ -1534,7 +1579,7 @@ fn refresh_sel(win: &slint::Weak<AppWindow>, c: &Controller) {
                     dh,
                 )
             };
-            set_sel_texts(&w, n, xywh);
+            set_sel_texts(&w, n, xywh, sel_len > 1);
         }
     }
 }

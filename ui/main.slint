@@ -16,6 +16,8 @@ export component AppWindow inherits Window {
     title: "NativeCanvas";
     preferred-width: 1280px;
     preferred-height: 800px;
+    min-width: 960px;
+    min-height: 600px;
     background: Theme.bg;
 
     in-out property <image> canvas-texture;
@@ -142,7 +144,7 @@ export component AppWindow inherits Window {
     callback key-release(string);
     callback select-layer-mod(int, bool, bool);
     callback drag-start(int);
-    callback drop-layer(int, float);
+    callback drop-layer(int, int);
     callback rename-layer(int, string);
     callback toggle-grid();
     callback toggle-snap();
@@ -246,9 +248,10 @@ export component AppWindow inherits Window {
         }
 
         grid := BentoGrid {
+            vertical-stretch: 1;
             // ===== Левая колонка: слои + дебагер =====
             col-layers := BentoColumn {
-                width: 232px;
+                width: 240px;
 
                 panel-layers := Panel {
                     SectionHeader { caption: "Layers"; }
@@ -322,7 +325,7 @@ export component AppWindow inherits Window {
 
             // ===== Правая колонка: инспектор + настройки =====
             BentoColumn {
-                width: 280px;
+                width: 260px;
 
                 Inspector {
                     has-selection: root.has-selection;

@@ -1,4 +1,5 @@
 import { Field, NumberField, SectionHeader, Divider, ActionButton } from "ds.slint";
+import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
 
 // Правая панель: параметры выделения (Bento-карточка).
@@ -68,372 +69,395 @@ export component Inspector inherits Rectangle {
     callback live-font-size(string);
     callback set-text-align(int);
 
+    vertical-stretch: 1;
     background: Theme.surface;
     border-radius: Theme.radius-md;
     border-width: 1px;
     border-color: Theme.border;
+    clip: true;
 
-    VerticalLayout {
-        padding: Theme.space-3;
-        spacing: Theme.space-2;
-
-        SectionHeader { caption: "Properties"; }
+    // Контент в ScrollView: при малой высоте окна правая панель скроллится,
+    // а панель Settings ниже остаётся на месте.
+    scroll := ScrollView {
+        vertical-stretch: 1;
 
         VerticalLayout {
-            visible: root.has-selection;
+            padding: Theme.space-3;
             spacing: Theme.space-2;
 
-            Text {
-                text: "Position & Rotation";
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-            }
-            NumberField {
-                label: "X";
-                value: root.sel-x-text;
-                edited(t) => { root.live-x(t); }
-                set-value(t) => { root.live-x(t); root.commit-field(0); }
-                scrubbed(d) => { root.scrub-delta(0, d); }
-            }
-            NumberField {
-                label: "Y";
-                value: root.sel-y-text;
-                edited(t) => { root.live-y(t); }
-                set-value(t) => { root.live-y(t); root.commit-field(1); }
-                scrubbed(d) => { root.scrub-delta(1, d); }
-            }
-            NumberField {
-                label: "°";
-                value: root.sel-rot-text;
-                edited(t) => { root.live-rot(t); }
-                set-value(t) => { root.live-rot(t); root.commit-field(4); }
-                scrubbed(d) => { root.scrub-delta(2, d); }
-            }
+            SectionHeader { caption: "Properties"; }
 
-            Divider {}
-
-            Text {
-                text: "Size";
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-            }
-            NumberField {
-                label: "W";
-                value: root.sel-w-text;
-                edited(t) => { root.live-w(t); }
-                set-value(t) => { root.live-w(t); root.commit-field(2); }
-                scrubbed(d) => { root.scrub-delta(3, d); }
-            }
-            NumberField {
-                label: "H";
-                value: root.sel-h-text;
-                edited(t) => { root.live-h(t); }
-                set-value(t) => { root.live-h(t); root.commit-field(3); }
-                scrubbed(d) => { root.scrub-delta(4, d); }
-            }
-
-            // Параметры текста (только для Text-узла).
             VerticalLayout {
-                visible: root.is-text;
+                visible: root.has-selection;
                 spacing: Theme.space-2;
 
-                Divider {}
-
                 Text {
-                    text: "Text";
+                    text: "Position";
                     color: Theme.text-muted;
                     font-size: Theme.font-xs;
                 }
+                // Ряд 1: X | Y.
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    NumberField {
+                        horizontal-stretch: 1;
+                        label: "X";
+                        value: root.sel-x-text;
+                        edited(t) => { root.live-x(t); }
+                        set-value(t) => { root.live-x(t); root.commit-field(0); }
+                        scrubbed(d) => { root.scrub-delta(0, d); }
+                    }
+                    NumberField {
+                        horizontal-stretch: 1;
+                        label: "Y";
+                        value: root.sel-y-text;
+                        edited(t) => { root.live-y(t); }
+                        set-value(t) => { root.live-y(t); root.commit-field(1); }
+                        scrubbed(d) => { root.scrub-delta(1, d); }
+                    }
+                }
+                // Ряд 2: Rotation (иконка).
                 NumberField {
-                    label: "Size";
-                    value: root.sel-font-size-text;
-                    edited(t) => { root.live-font-size(t); }
-                    set-value(t) => { root.live-font-size(t); root.commit-field(16); }
+                    label: "°";
+                    show-icon: true;
+                    icon: @image-url("../../assets/icons/rotate-cw.svg");
+                    tooltip-hint: "Rotation";
+                    value: root.sel-rot-text;
+                    edited(t) => { root.live-rot(t); }
+                    set-value(t) => { root.live-rot(t); root.commit-field(4); }
+                    scrubbed(d) => { root.scrub-delta(2, d); }
                 }
-                HorizontalLayout {
-                    spacing: Theme.space-1;
-                    ActionButton { horizontal-stretch: 1; text: "L"; checked: root.sel-align == 0; clicked => { root.set-text-align(0); } }
-                    ActionButton { horizontal-stretch: 1; text: "C"; checked: root.sel-align == 1; clicked => { root.set-text-align(1); } }
-                    ActionButton { horizontal-stretch: 1; text: "R"; checked: root.sel-align == 2; clicked => { root.set-text-align(2); } }
-                }
-            }
-
-            VerticalLayout {
-                visible: root.is-frame;
-                spacing: Theme.space-2;
 
                 Divider {}
 
                 Text {
-                    text: "Auto layout";
+                    text: "Size";
                     color: Theme.text-muted;
                     font-size: Theme.font-xs;
                 }
                 HorizontalLayout {
-                    spacing: Theme.space-1;
-                    ActionButton { horizontal-stretch: 1; text: "None"; checked: root.layout-mode == 0; clicked => { root.set-layout-mode(0); } }
-                    ActionButton { horizontal-stretch: 1; text: "Flex"; checked: root.layout-mode == 1; clicked => { root.set-layout-mode(1); } }
+                    spacing: Theme.space-2;
+                    NumberField {
+                        horizontal-stretch: 1;
+                        label: "W";
+                        value: root.sel-w-text;
+                        edited(t) => { root.live-w(t); }
+                        set-value(t) => { root.live-w(t); root.commit-field(2); }
+                        scrubbed(d) => { root.scrub-delta(3, d); }
+                    }
+                    NumberField {
+                        horizontal-stretch: 1;
+                        label: "H";
+                        value: root.sel-h-text;
+                        edited(t) => { root.live-h(t); }
+                        set-value(t) => { root.live-h(t); root.commit-field(3); }
+                        scrubbed(d) => { root.scrub-delta(4, d); }
+                    }
                 }
-                // Направление, сетка выравнивания и распределение — только при Flex.
+
+                // Параметры текста (только для Text-узла).
                 VerticalLayout {
-                    visible: root.layout-mode == 1;
+                    visible: root.is-text;
                     spacing: Theme.space-2;
 
+                    Divider {}
+
+                    Text {
+                        text: "Text";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                    }
+                    NumberField {
+                        label: "Size";
+                        value: root.sel-font-size-text;
+                        edited(t) => { root.live-font-size(t); }
+                        set-value(t) => { root.live-font-size(t); root.commit-field(16); }
+                    }
                     HorizontalLayout {
                         spacing: Theme.space-1;
-                        ActionButton { horizontal-stretch: 1; text: "Row"; checked: root.sel-layout-direction == 0; clicked => { root.set-layout-direction(0); } }
-                        ActionButton { horizontal-stretch: 1; text: "Column"; checked: root.sel-layout-direction == 1; clicked => { root.set-layout-direction(1); } }
+                        ActionButton { horizontal-stretch: 1; text: "L"; checked: root.sel-align == 0; clicked => { root.set-text-align(0); } }
+                        ActionButton { horizontal-stretch: 1; text: "C"; checked: root.sel-align == 1; clicked => { root.set-text-align(1); } }
+                        ActionButton { horizontal-stretch: 1; text: "R"; checked: root.sel-align == 2; clicked => { root.set-text-align(2); } }
                     }
-                    // Сетка 3×3: строки = выравнивание поперёк оси (align),
-                    // столбцы = распределение вдоль оси (justify: Min/Center/Max).
-                    VerticalLayout {
+                }
+
+                VerticalLayout {
+                    visible: root.is-frame;
+                    spacing: Theme.space-2;
+
+                    Divider {}
+
+                    Text {
+                        text: "Auto layout";
+                        color: Theme.text-muted;
+                        font-size: Theme.font-xs;
+                    }
+                    HorizontalLayout {
                         spacing: Theme.space-1;
-                        for r in [0, 1, 2] : HorizontalLayout {
+                        ActionButton { horizontal-stretch: 1; text: "None"; checked: root.layout-mode == 0; clicked => { root.set-layout-mode(0); } }
+                        ActionButton { horizontal-stretch: 1; text: "Flex"; checked: root.layout-mode == 1; clicked => { root.set-layout-mode(1); } }
+                    }
+                    // Направление, сетка выравнивания и распределение — только при Flex.
+                    VerticalLayout {
+                        visible: root.layout-mode == 1;
+                        spacing: Theme.space-2;
+
+                        HorizontalLayout {
                             spacing: Theme.space-1;
-                            for c in [0, 1, 2] : ActionButton {
-                                horizontal-stretch: 1;
-                                height: 22px;
-                                text: "•";
-                                checked: root.sel-layout-align == r && root.sel-layout-justify == c;
-                                clicked => {
-                                    root.set-layout-align(r);
-                                    root.set-layout-justify(c);
+                            ActionButton { horizontal-stretch: 1; text: "Row"; checked: root.sel-layout-direction == 0; clicked => { root.set-layout-direction(0); } }
+                            ActionButton { horizontal-stretch: 1; text: "Column"; checked: root.sel-layout-direction == 1; clicked => { root.set-layout-direction(1); } }
+                        }
+                        // Сетка 3×3: строки = выравнивание поперёк оси (align),
+                        // столбцы = распределение вдоль оси (justify: Min/Center/Max).
+                        VerticalLayout {
+                            spacing: Theme.space-1;
+                            for r in [0, 1, 2] : HorizontalLayout {
+                                spacing: Theme.space-1;
+                                for c in [0, 1, 2] : ActionButton {
+                                    horizontal-stretch: 1;
+                                    height: 22px;
+                                    text: "•";
+                                    checked: root.sel-layout-align == r && root.sel-layout-justify == c;
+                                    clicked => {
+                                        root.set-layout-align(r);
+                                        root.set-layout-justify(c);
+                                    }
                                 }
                             }
                         }
+                        HorizontalLayout {
+                            spacing: Theme.space-1;
+                            ActionButton {
+                                horizontal-stretch: 1;
+                                text: "⇄ Space between";
+                                checked: root.sel-layout-justify == 3;
+                                clicked => { root.set-layout-justify(3); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Theme.space-1;
+                            NumberField {
+                                horizontal-stretch: 1;
+                                label: "Gap";
+                                value: root.sel-layout-gap;
+                                edited(t) => { root.live-layout-gap(t); }
+                                set-value(t) => { root.live-layout-gap(t); root.commit-field(13); }
+                                scrubbed(d) => { root.scrub-layout-gap(d); }
+                            }
+                            NumberField {
+                                horizontal-stretch: 1;
+                                label: "Pad";
+                                value: root.sel-layout-padding;
+                                edited(t) => { root.live-layout-padding(t); }
+                                set-value(t) => { root.live-layout-padding(t); root.commit-field(14); }
+                                scrubbed(d) => { root.scrub-layout-padding(d); }
+                            }
+                        }
                     }
+                }
+
+                Divider {}
+
+                Text {
+                    text: "Appearance";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+                // Ряд: Opacity | Corner radius (свёрнутое поле R).
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    NumberField {
+                        horizontal-stretch: 1;
+                        label: "%";
+                        value: root.sel-opacity-text;
+                        step: 1.0;
+                        tooltip-hint: "Opacity";
+                        edited(t) => { root.live-opacity(t); }
+                        set-value(t) => { root.live-opacity(t); root.commit-field(5); }
+                        scrubbed(d) => { root.scrub-delta(5, d); }
+                    }
+                    NumberField {
+                        visible: !root.sel-corner-expanded;
+                        horizontal-stretch: 1;
+                        label: "R";
+                        value: root.sel-corner-text;
+                        tooltip-hint: "Value, expression or % of smaller side";
+                        edited(t) => { root.live-corner-uniform(t); }
+                        set-value(t) => { root.live-corner-uniform(t); root.commit-field(15); }
+                        scrubbed(d) => { root.scrub-corner-uniform(d); }
+                    }
+                }
+                // Развернутое состояние: 4 угла TL/TR/BR/BL.
+                VerticalLayout {
+                    visible: root.sel-corner-expanded;
+                    spacing: Theme.space-1;
                     HorizontalLayout {
                         spacing: Theme.space-1;
-                        ActionButton {
+                        NumberField {
                             horizontal-stretch: 1;
-                            text: "⇄ Space between";
-                            checked: root.sel-layout-justify == 3;
-                            clicked => { root.set-layout-justify(3); }
+                            label: "TL";
+                            value: root.sel-corner-tl-text;
+                            edited(t) => { root.live-corner(0, t); }
+                            set-value(t) => { root.live-corner(0, t); root.commit-field(9); }
+                            scrubbed(d) => { root.scrub-delta(7, d); }
+                        }
+                        NumberField {
+                            horizontal-stretch: 1;
+                            label: "TR";
+                            value: root.sel-corner-tr-text;
+                            edited(t) => { root.live-corner(1, t); }
+                            set-value(t) => { root.live-corner(1, t); root.commit-field(10); }
+                            scrubbed(d) => { root.scrub-delta(8, d); }
                         }
                     }
                     HorizontalLayout {
                         spacing: Theme.space-1;
                         NumberField {
                             horizontal-stretch: 1;
-                            label: "Gap";
-                            value: root.sel-layout-gap;
-                            edited(t) => { root.live-layout-gap(t); }
-                            set-value(t) => { root.live-layout-gap(t); root.commit-field(13); }
-                            scrubbed(d) => { root.scrub-layout-gap(d); }
+                            label: "BR";
+                            value: root.sel-corner-br-text;
+                            edited(t) => { root.live-corner(2, t); }
+                            set-value(t) => { root.live-corner(2, t); root.commit-field(11); }
+                            scrubbed(d) => { root.scrub-delta(9, d); }
                         }
                         NumberField {
                             horizontal-stretch: 1;
-                            label: "Pad";
-                            value: root.sel-layout-padding;
-                            edited(t) => { root.live-layout-padding(t); }
-                            set-value(t) => { root.live-layout-padding(t); root.commit-field(14); }
-                            scrubbed(d) => { root.scrub-layout-padding(d); }
+                            label: "BL";
+                            value: root.sel-corner-bl-text;
+                            edited(t) => { root.live-corner(3, t); }
+                            set-value(t) => { root.live-corner(3, t); root.commit-field(12); }
+                            scrubbed(d) => { root.scrub-delta(10, d); }
                         }
                     }
                 }
-            }
-
-            Divider {}
-
-            Text {
-                text: "Appearance";
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-            }
-            NumberField {
-                label: "%";
-                value: root.sel-opacity-text;
-                step: 1.0;
-                edited(t) => { root.live-opacity(t); }
-                set-value(t) => { root.live-opacity(t); root.commit-field(5); }
-                scrubbed(d) => { root.scrub-delta(5, d); }
-            }
-            Text {
-                text: "Corner radius";
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-                vertical-alignment: center;
-            }
-            // Свернутое состояние: одно поле R + кнопка раскрытия 4 углов.
-            NumberField {
-                visible: !root.sel-corner-expanded;
-                label: "R";
-                value: root.sel-corner-text;
-                tooltip-hint: "Value, expression or % of smaller side";
-                edited(t) => { root.live-corner-uniform(t); }
-                set-value(t) => { root.live-corner-uniform(t); root.commit-field(15); }
-                scrubbed(d) => { root.scrub-corner-uniform(d); }
-            }
-            // Развернутое состояние: 4 угла TL/TR/BR/BL.
-            VerticalLayout {
-                visible: root.sel-corner-expanded;
-                spacing: Theme.space-1;
-                HorizontalLayout {
-                    spacing: Theme.space-1;
-                    NumberField {
-                        horizontal-stretch: 1;
-                        label: "TL";
-                        value: root.sel-corner-tl-text;
-                        edited(t) => { root.live-corner(0, t); }
-                        set-value(t) => { root.live-corner(0, t); root.commit-field(9); }
-                        scrubbed(d) => { root.scrub-delta(7, d); }
-                    }
-                    NumberField {
-                        horizontal-stretch: 1;
-                        label: "TR";
-                        value: root.sel-corner-tr-text;
-                        edited(t) => { root.live-corner(1, t); }
-                        set-value(t) => { root.live-corner(1, t); root.commit-field(10); }
-                        scrubbed(d) => { root.scrub-delta(8, d); }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: Theme.space-1;
-                    NumberField {
-                        horizontal-stretch: 1;
-                        label: "BR";
-                        value: root.sel-corner-br-text;
-                        edited(t) => { root.live-corner(2, t); }
-                        set-value(t) => { root.live-corner(2, t); root.commit-field(11); }
-                        scrubbed(d) => { root.scrub-delta(9, d); }
-                    }
-                    NumberField {
-                        horizontal-stretch: 1;
-                        label: "BL";
-                        value: root.sel-corner-bl-text;
-                        edited(t) => { root.live-corner(3, t); }
-                        set-value(t) => { root.live-corner(3, t); root.commit-field(12); }
-                        scrubbed(d) => { root.scrub-delta(10, d); }
-                    }
-                }
-            }
-            // Кнопка-переключатель свёрнутого/развёрнутого вида.
-            Rectangle {
-                height: 24px;
-                width: 100%;
-                border-radius: Theme.radius-sm;
-                background: expand-touch.pressed ? Theme.surface-raised : Theme.surface;
-                border-width: 1px;
-                border-color: Theme.border;
-                expand-touch := TouchArea {
-                    clicked => { root.toggle-corner-expand(); }
-                    Tooltip { text: @markdown("Switch to 4-corner editing"); }
-                    Text {
-                        text: root.sel-corner-expanded ? "▾ collapse" : "▸ corners";
-                        color: Theme.text-muted;
-                        font-size: Theme.font-xs;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-
-            Divider {}
-
-            Text {
-                text: "Fill";
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-            }
-            HorizontalLayout {
-                spacing: Theme.space-2;
+                // Кнопка-переключатель свёрнутого/развёрнутого вида.
                 Rectangle {
-                    width: 30px;
-                    height: 30px;
+                    height: 24px;
+                    width: 100%;
                     border-radius: Theme.radius-sm;
+                    background: expand-touch.pressed ? Theme.surface-raised : Theme.surface;
                     border-width: 1px;
-                    border-color: Theme.border-strong;
-                    background: root.sel-fill-preview;
-                    touch := TouchArea {
-                        clicked => { root.open-picker(); }
-                    }
-                }
-                Field {
-                    horizontal-stretch: 1;
-                    text: root.sel-fill;
-                    edited(t) => { root.live-fill(t); }
-                    accepted(t) => { root.live-fill(t); }
-                }
-                Rectangle {
-                    width: 30px;
-                    height: 30px;
-                    border-radius: Theme.radius-sm;
-                    border-width: 1px;
-                    border-color: Theme.border-strong;
-                    background: touch.pressed ? Theme.surface-raised : Theme.surface;
-                    dots-touch := TouchArea {
-                        clicked => { root.open-picker(); }
+                    border-color: Theme.border;
+                    expand-touch := TouchArea {
+                        clicked => { root.toggle-corner-expand(); }
+                        Tooltip { text: @markdown("Switch to 4-corner editing"); }
                         Text {
-                            text: "⋯";
-                            color: Theme.text;
-                            font-size: Theme.font-sm;
+                            text: root.sel-corner-expanded ? "▾ collapse" : "▸ corners";
+                            color: Theme.text-muted;
+                            font-size: Theme.font-xs;
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
                     }
                 }
-            }
 
-            Divider {}
+                Divider {}
 
-            Text {
-                text: "Stroke";
-                color: Theme.text-muted;
-                font-size: Theme.font-xs;
-            }
-            HorizontalLayout {
-                spacing: Theme.space-2;
-                Rectangle {
-                    width: 30px;
-                    height: 30px;
-                    border-radius: Theme.radius-sm;
-                    border-width: 1px;
-                    border-color: Theme.border-strong;
-                    background: root.sel-stroke-preview;
-                    stroke-touch := TouchArea {
-                        clicked => { root.open-stroke-picker(); }
+                Text {
+                    text: "Fill";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        background: root.sel-fill-preview;
+                        touch := TouchArea {
+                            clicked => { root.open-picker(); }
+                        }
                     }
-                }
-                Field {
-                    horizontal-stretch: 1;
-                    text: root.sel-stroke;
-                    edited(t) => { root.live-stroke(t); }
-                    accepted(t) => { root.live-stroke(t); }
-                }
-                Rectangle {
-                    width: 30px;
-                    height: 30px;
-                    border-radius: Theme.radius-sm;
-                    border-width: 1px;
-                    border-color: root.sel-stroke-dash ? Theme.accent : Theme.border-strong;
-                    background: stroke-dots-touch.pressed ? Theme.surface-raised : Theme.surface;
-                    stroke-dots-touch := TouchArea {
-                        clicked => { root.toggle-stroke-dash(); }
-                        Text {
-                            text: "┅";
-                            color: Theme.text;
-                            font-size: Theme.font-sm;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
+                    Field {
+                        horizontal-stretch: 1;
+                        text: root.sel-fill;
+                        edited(t) => { root.live-fill(t); }
+                        accepted(t) => { root.live-fill(t); }
+                    }
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        background: touch.pressed ? Theme.surface-raised : Theme.surface;
+                        dots-touch := TouchArea {
+                            clicked => { root.open-picker(); }
+                            Text {
+                                text: "⋯";
+                                color: Theme.text;
+                                font-size: Theme.font-sm;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
                         }
                     }
                 }
-            }
-            NumberField {
-                label: "W";
-                value: root.sel-stroke-width-text;
-                step: 0.5;
-                edited(t) => { root.live-stroke-width(t); }
-                set-value(t) => { root.live-stroke-width(t); root.commit-field(8); }
-                scrubbed(d) => { root.scrub-delta(6, d); }
-            }
-        }
 
-        Text {
-            text: root.sel-hint != "" ? root.sel-hint : "Select a node";
-            color: Theme.text-faint;
-            font-size: Theme.font-sm;
-            visible: !root.has-selection;
+                Divider {}
+
+                Text {
+                    text: "Stroke";
+                    color: Theme.text-muted;
+                    font-size: Theme.font-xs;
+                }
+                HorizontalLayout {
+                    spacing: Theme.space-2;
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        background: root.sel-stroke-preview;
+                        stroke-touch := TouchArea {
+                            clicked => { root.open-stroke-picker(); }
+                        }
+                    }
+                    Field {
+                        horizontal-stretch: 1;
+                        text: root.sel-stroke;
+                        edited(t) => { root.live-stroke(t); }
+                        accepted(t) => { root.live-stroke(t); }
+                    }
+                    Rectangle {
+                        width: 30px;
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: root.sel-stroke-dash ? Theme.accent : Theme.border-strong;
+                        background: stroke-dots-touch.pressed ? Theme.surface-raised : Theme.surface;
+                        stroke-dots-touch := TouchArea {
+                            clicked => { root.toggle-stroke-dash(); }
+                            Text {
+                                text: "┅";
+                                color: Theme.text;
+                                font-size: Theme.font-sm;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+                NumberField {
+                    label: "W";
+                    value: root.sel-stroke-width-text;
+                    step: 0.5;
+                    edited(t) => { root.live-stroke-width(t); }
+                    set-value(t) => { root.live-stroke-width(t); root.commit-field(8); }
+                    scrubbed(d) => { root.scrub-delta(6, d); }
+                }
+            }
+
+            Text {
+                text: root.sel-hint != "" ? root.sel-hint : "Select a node";
+                color: Theme.text-faint;
+                font-size: Theme.font-sm;
+                visible: !root.has-selection;
+            }
         }
     }
 }

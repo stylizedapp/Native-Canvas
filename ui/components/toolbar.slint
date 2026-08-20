@@ -1,15 +1,15 @@
 import { IconButton } from "ds.slint";
 import { Theme } from "../theme.slint";
 
-// Плавающая панель инструментов («пилюля») — вешается поверх канваса
-// в CanvasView, по центру сверху. Иконки — Lucide, монохром, тонируются
-// через `colorize` (тема + активное состояние).
+// Плавающая панель инструментов — вешается поверх канваса в CanvasView,
+// по центру снизу. Иконки — Lucide, монохром, тонируются через `colorize`.
+// Ширина: padding(8) + 7×36 + 6×4(spacing) = 284px.
 export component Toolbar inherits Rectangle {
     in-out property <string> active-tool: "select";
 
     callback tool-selected(string);
 
-    width: 240px;
+    width: 284px;
     height: 44px;
     background: Theme.surface;
     border-radius: Theme.radius-md;
@@ -19,12 +19,12 @@ export component Toolbar inherits Rectangle {
     HorizontalLayout {
         padding: Theme.space-1;
         spacing: Theme.space-1;
-        IconButton { horizontal-stretch: 1; icon: @image-url("../../assets/icons/select.svg"); tooltip: "Select (V)"; active: root.active-tool == "select"; clicked => { root.tool-selected("select"); } }
-        IconButton { horizontal-stretch: 1; icon: @image-url("../../assets/icons/hand.svg"); tooltip: "Pan (H)"; active: root.active-tool == "pan"; clicked => { root.tool-selected("pan"); } }
-        IconButton { horizontal-stretch: 1; icon: @image-url("../../assets/icons/square.svg"); tooltip: "Rectangle"; active: root.active-tool == "rectangle"; clicked => { root.tool-selected("rectangle"); } }
-        IconButton { horizontal-stretch: 1; icon: @image-url("../../assets/icons/circle.svg"); tooltip: "Ellipse"; active: root.active-tool == "ellipse"; clicked => { root.tool-selected("ellipse"); } }
-        IconButton { horizontal-stretch: 1; icon: @image-url("../../assets/icons/minus.svg"); tooltip: "Line"; active: root.active-tool == "line"; clicked => { root.tool-selected("line"); } }
-        IconButton { horizontal-stretch: 1; icon: @image-url("../../assets/icons/frame.svg"); tooltip: "Frame"; active: root.active-tool == "frame"; clicked => { root.tool-selected("frame"); } }
-        IconButton { horizontal-stretch: 1; icon: @image-url("../../assets/icons/type.svg"); tooltip: "Text (T)"; active: root.active-tool == "text"; clicked => { root.tool-selected("text"); } }
+        IconButton { btn-size: 36px; horizontal-stretch: 0; icon: @image-url("../../assets/icons/select.svg"); tooltip: "Select (V)"; active: root.active-tool == "select"; clicked => { root.tool-selected("select"); } }
+        IconButton { btn-size: 36px; horizontal-stretch: 0; icon: @image-url("../../assets/icons/hand.svg"); tooltip: "Pan (H)"; active: root.active-tool == "pan"; clicked => { root.tool-selected("pan"); } }
+        IconButton { btn-size: 36px; horizontal-stretch: 0; icon: @image-url("../../assets/icons/square.svg"); tooltip: "Rectangle"; active: root.active-tool == "rectangle"; clicked => { root.tool-selected("rectangle"); } }
+        IconButton { btn-size: 36px; horizontal-stretch: 0; icon: @image-url("../../assets/icons/circle.svg"); tooltip: "Ellipse"; active: root.active-tool == "ellipse"; clicked => { root.tool-selected("ellipse"); } }
+        IconButton { btn-size: 36px; horizontal-stretch: 0; icon: @image-url("../../assets/icons/minus.svg"); tooltip: "Line"; active: root.active-tool == "line"; clicked => { root.tool-selected("line"); } }
+        IconButton { btn-size: 36px; horizontal-stretch: 0; icon: @image-url("../../assets/icons/frame.svg"); tooltip: "Frame"; active: root.active-tool == "frame"; clicked => { root.tool-selected("frame"); } }
+        IconButton { btn-size: 36px; horizontal-stretch: 0; icon: @image-url("../../assets/icons/type.svg"); tooltip: "Text (T)"; active: root.active-tool == "text"; clicked => { root.tool-selected("text"); } }
     }
 }
