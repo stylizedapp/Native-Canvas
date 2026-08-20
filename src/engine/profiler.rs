@@ -96,11 +96,13 @@ impl FrameProfiler {
         process_working_set_mb()
     }
 
-    /// Снимок метрик для оверлея/лога (кнопка Debug).
-    pub fn take_snapshot(&self) -> String {
+    /// Снимок метрик для оверлея/лога (кнопка Debug). `extra` дописывается
+    /// в конец (например, GL-презентация канваса из `CanvasState`).
+    pub fn take_snapshot(&self, extra: &str) -> String {
         format!(
             "FPS {:.0}  |  render {:.2} ms (scene {:.2} + encode {:.2} + readback {:.2})\n\
-             RAM {:.0} MB  |  window {} frames",
+             RAM {:.0} MB  |  window {} frames\n\
+             {extra}",
             self.fps(),
             self.avg_total_ms(),
             self.avg_scene_build_ms(),
@@ -184,7 +186,7 @@ mod tests {
         let mut p = FrameProfiler::new();
         p.record(metrics(2000));
         p.record(metrics(2000));
-        let s = p.take_snapshot();
+        let s = p.take_snapshot("GL: test");
         assert!(s.contains("FPS"));
         assert!(s.contains("RAM"));
         assert!(s.contains("render"));

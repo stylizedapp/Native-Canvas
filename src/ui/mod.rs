@@ -20,11 +20,6 @@ slint::include_modules!();
 pub type Controller = Rc<RefCell<CanvasController>>;
 pub type RendererRef = Rc<RefCell<Box<dyn Renderer>>>;
 
-/// Максимальный размер длинной стороны буфера рендера (кэп разрешения).
-/// Снижает нагрузку растеризации на больших окнах; ввод остаётся точным
-/// (координаты логические, растеризация масштабируется отдельно).
-const MAX_RENDER_DIM: f32 = 1920.0;
-
 /// Переиспользуемые буферы холста, статистика и кэш UI-строк (чтобы не
 /// переустанавливать неизменные свойства Slint на каждом кадре).
 pub struct CanvasState {
@@ -35,6 +30,8 @@ pub struct CanvasState {
     pub cur: usize,
     pub w: u32,
     pub h: u32,
+    /// Кэп длинной стороны буфера рендера (настраивается в Settings).
+    pub render_max_dim: f32,
     pub last_revision: u64,
     /// Кол-во мутаций на последнем отрисованном кадре (debug-инвариант).
     pub last_rendered_ops: u64,
@@ -91,6 +88,8 @@ pub struct CanvasState {
     pub gl_present_us: u128,
     pub gl_frame_us: u128,
     pub gl_frame_gap_us: u128,
+    /// Сколько on-demand кадров пропущено в покое (чистый dirty).
+    pub idle_render_skips: u64,
 }
 
 /// Индексы полей инспектора в `sel_edited_at` и диф-кэше.
@@ -122,6 +121,7 @@ impl CanvasState {
             cur: 0,
             w: 0,
             h: 0,
+            render_max_dim: 1920.0,
             last_revision: u64::MAX,
             last_rendered_ops: 0,
             fps_frames: 0,
@@ -164,7 +164,19 @@ impl CanvasState {
             gl_present_us: 0,
             gl_frame_us: 0,
             gl_frame_gap_us: 0,
+            idle_render_skips: 0,
         }
+    }
+
+    /// Сводка GL-презентации для снапшота профайлера (Debug toggle).
+    pub fn presentation_summary(&self) -> String {
+        format!(
+            "GL: present {:.3} ms | frame {:.3} ms | gap {:.3} ms | idle skips {}",
+            self.gl_present_us as f64 / 1000.0,
+            self.gl_frame_us as f64 / 1000.0,
+            self.gl_frame_gap_us as f64 / 1000.0,
+            self.idle_render_skips,
+        )
     }
 
     /// Обновляет размер буфера. Возвращает true, если размер изменился.
@@ -210,15 +222,16 @@ pub fn sync(
         w.get_canvas_height().round().max(1.0),
     );
 
+    let mut c = controller.borrow_mut();
+    let mut st = state.borrow_mut();
+
     // Кэп разрешения: буфер = область * scale (ввод остаётся в логических px).
-    let scale = (MAX_RENDER_DIM / area_w.max(area_h)).min(1.0);
+    // Значение настраивается в Settings (`render_max_dim`, по умолчанию 1920).
+    let scale = (st.render_max_dim / area_w.max(area_h)).min(1.0);
     let (bw, bh) = (
         (area_w * scale).round().max(1.0) as u32,
         (area_h * scale).round().max(1.0) as u32,
     );
-
-    let mut c = controller.borrow_mut();
-    let mut st = state.borrow_mut();
 
     // Инлайн-редактор текста: оверлей в экранных координатах (слой Slint).
     // Текст в поле пишется только при старте редактирования — дальше поле
@@ -262,6 +275,7 @@ pub fn sync(
     }
 
     if !c.dirty && !size_changed {
+        st.idle_render_skips += 1;
         return;
     }
 
@@ -415,7 +429,7 @@ pub fn sync(
              Tool: {}  |  Revision: {}\n\
              Grid: {}  |  Snap: {}  |  Step: {}\n\
              Backend: {}\n\
-             GL: present {:.3} ms  |  frame {:.3} ms  |  gap {:.3} ms",
+             GL: present {:.3} ms  |  frame {:.3} ms  |  gap {:.3} ms  |  idle skips {}",
             st.fps,
             st.last_render_us as f64 / 1000.0,
             c.scene.len(),
@@ -434,6 +448,7 @@ pub fn sync(
             st.gl_present_us as f64 / 1000.0,
             st.gl_frame_us as f64 / 1000.0,
             st.gl_frame_gap_us as f64 / 1000.0,
+            st.idle_render_skips,
         )
         .into(),
     );

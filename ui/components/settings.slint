@@ -16,6 +16,7 @@ export component SettingsPanel inherits Rectangle {
     in property <bool> grid: false;
     in property <bool> snap: false;
     in property <string> step: "";
+    in property <string> render-max-dim: "1920";
     in property <[ShortcutEditRow]> shortcut-rows;
 
     callback close();
@@ -23,6 +24,7 @@ export component SettingsPanel inherits Rectangle {
     callback set-grid(bool);
     callback set-snap(bool);
     callback set-step(string);
+    callback set-render-max-dim(string);
     callback set-shortcut(string, string);
     callback commit-shortcut(string, string);
     callback reset-shortcuts();
@@ -106,6 +108,12 @@ export component SettingsPanel inherits Rectangle {
                         value: root.step;
                         edited(t) => { root.set-step(t); }
                         set-value(t) => { root.set-step(t); }
+                    }
+                    NumberField {
+                        label: "Render dim (px)";
+                        value: root.render-max-dim;
+                        edited(t) => { root.set-render-max-dim(t); }
+                        set-value(t) => { root.set-render-max-dim(t); }
                     }
 
                     Divider {}

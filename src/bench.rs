@@ -53,7 +53,7 @@ pub fn run() {
         // Рендер кадра (tiny-skia, 1280x800).
         let (w, h) = (1280u32, 800u32);
         let mut out = vec![0u8; (w * h * 4) as usize];
-        let mut renderer = crate::engine::renderers::TinySkiaRenderer;
+        let mut renderer = crate::engine::renderers::TinySkiaRenderer::new();
         let t = Instant::now();
         renderer.render(&s, &cam, w, h, &[], GridConfig::new(), None, None, None, &mut out);
         fmt_us(&format!("render tiny-skia {n} nodes"), t.elapsed().as_micros() as f64, "первый кадр");

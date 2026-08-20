@@ -1,8 +1,9 @@
 ﻿use super::{
-    clips_children, rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, DROP_FILL,
-    DROP_STROKE, GIZMO_HANDLE_FILL, GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN,
-    PAGE_BG, PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
+    clips_children, rects_intersect, RenderOutcome, Renderer, CANVAS_BG, DROP_FILL, DROP_STROKE,
+    GIZMO_HANDLE_FILL, GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN, PAGE_BG,
+    PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
 };
+use super::geom::{geom_hash, grid_key, text_glyphs, GridKey};
 use super::super::grid::GridConfig;
 use super::super::model::nodes::{NodeKey, NodeKind, ShapeKind};
 use super::super::model::scene::{SceneGraph, SceneNode};
@@ -12,6 +13,7 @@ use super::super::transform::Camera;
 use crate::engine::controller::Preview;
 use crate::engine::gizmo;
 use glam::{Affine2, Vec2};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -47,6 +49,13 @@ pub struct VelloRenderer {
     staging: [Option<StagingSlot>; 2],
     /// Хотя бы раз показали кадр (буфер не пустой мусор).
     has_image: bool,
+    /// Кэш раскладки текста: NodeKey -> (хэш геометрии, слитый путь глифов).
+    /// Снимает шейпинг/outline каждого кадра; при статичном узле — 1 draw-call.
+    text: HashMap<NodeKey, (u64, kurbo::BezPath)>,
+    /// Длина графа на последнем рендере: структурное изменение чистит `text`.
+    text_len: usize,
+    /// Кэш пути сетки: переиспользуется, пока камера/шаг не изменились.
+    grid: Option<(GridKey, kurbo::BezPath)>,
 }
 
 impl VelloRenderer {
@@ -90,6 +99,9 @@ impl VelloRenderer {
             target: None,
             staging: [None, None],
             has_image: false,
+            text: HashMap::new(),
+            text_len: 0,
+            grid: None,
         })
     }
 
@@ -175,6 +187,11 @@ impl Renderer for VelloRenderer {
         let bg = CANVAS_BG;
         let t_build = Instant::now();
         self.scene.reset();
+        // Структурное изменение графа (вставка/удаление/загрузка) — кэш устарел.
+        if scene.len() != self.text_len {
+            self.text.clear();
+            self.text_len = scene.len();
+        }
         {
             let mut vs = &mut self.scene;
 
@@ -192,7 +209,8 @@ impl Renderer for VelloRenderer {
             stroke_shape(&mut vs, cam_t, rgba8(PAGE_BORDER, 1.0), (1.0 / zoom) as f64, &page);
         }
 
-        // Сетка — один path, один draw-call, адаптивный шаг.
+        // Сетка — один path, один draw-call, адаптивный шаг. Путь кэшируется:
+        // пока камера и шаг не меняются (драг узла), перестраивать его не нужно.
         if grid.visible {
             let mut s = grid.step.max(1.0);
             while s * zoom < 8.0 {
@@ -202,22 +220,30 @@ impl Renderer for VelloRenderer {
             let x1 = (view_max.x / s).ceil();
             let y0 = (view_min.y / s).floor();
             let y1 = (view_max.y / s).ceil();
-            let mut pb = kurbo::BezPath::new();
-            let mut x = x0;
-            while x <= x1 {
-                let wx = x * s;
-                pb.move_to((wx as f64, view_min.y as f64));
-                pb.line_to((wx as f64, view_max.y as f64));
-                x += 1.0;
-            }
-            let mut y = y0;
-            while y <= y1 {
-                let wy = y * s;
-                pb.move_to((view_min.x as f64, wy as f64));
-                pb.line_to((view_max.x as f64, wy as f64));
-                y += 1.0;
-            }
-            stroke_shape(&mut vs, cam_t, rgba8(GRID, 1.0), (1.0 / zoom) as f64, &pb);
+            let gk = grid_key(s, x0, x1, y0, y1, view_min.x, view_min.y, view_max.x, view_max.y);
+            let pb = match &self.grid {
+                Some((k, p)) if *k == gk => p,
+                _ => {
+                    let mut path = kurbo::BezPath::new();
+                    let mut x = x0;
+                    while x <= x1 {
+                        let wx = x * s;
+                        path.move_to((wx as f64, view_min.y as f64));
+                        path.line_to((wx as f64, view_max.y as f64));
+                        x += 1.0;
+                    }
+                    let mut y = y0;
+                    while y <= y1 {
+                        let wy = y * s;
+                        path.move_to((view_min.x as f64, wy as f64));
+                        path.line_to((view_max.x as f64, wy as f64));
+                        y += 1.0;
+                    }
+                    self.grid = Some((gk, path));
+                    &self.grid.as_ref().unwrap().1
+                }
+            };
+            stroke_shape(&mut vs, cam_t, rgba8(GRID, 1.0), (1.0 / zoom) as f64, pb);
         }
 
         // Однопроходный обход дерева по кэшированным мировым трансформациям (O(n)).
@@ -229,11 +255,13 @@ impl Renderer for VelloRenderer {
                 continue;
             }
             let world = node.world_transform;
-            let (mn, mx) = world_bbox(&node.kind, world);
+            // Кэшированная мировая рамка (уже посчитана в flush_transforms) —
+            // без повторного measure текста и конвертации углов.
+            let (mn, mx) = scene.world_bbox(key).unwrap_or((Vec2::ZERO, Vec2::ZERO));
             let visible = rects_intersect(mn, mx, view_min, view_max);
             if visible {
                 let screen = to_affine(cam_affine * world);
-                draw_node(&mut vs, node, screen);
+                draw_node(&mut vs, &mut self.text, key, node, screen);
             }
             // Иерархический culling: у обрезанного контейнера вне вьюпорта детей
             // рисовать незачем; у остальных нод (вырожденный bbox / без clip)
@@ -569,7 +597,13 @@ fn stroke_node(
     scene.stroke(&stroke, t, Brush::Solid(color), None, shape);
 }
 
-fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
+fn draw_node(
+    scene: &mut VelloScene,
+    text: &mut HashMap<NodeKey, (u64, kurbo::BezPath)>,
+    key: NodeKey,
+    node: &SceneNode,
+    screen: kurbo::Affine,
+) {
     match &node.kind {
         NodeKind::Frame { size, corner_radii, .. }
         | NodeKind::Shape(ShapeKind::Rectangle { size, corner_radii }) => {
@@ -604,10 +638,14 @@ fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
                 let a = (f[3] as f32 * node.opacity).round().clamp(0.0, 255.0) as u8;
                 if a > 0 {
                     let brush = Brush::Solid(rgba8(f, node.opacity));
-                    for line in crate::engine::text::layout(&node.kind) {
-                        for glyph in &line.glyphs {
-                            scene.fill(Fill::NonZero, screen, brush.clone(), None, glyph);
-                        }
+                    // Кэш: шейпинг + outline текста один раз, дальше — один
+                    // draw-call слитым контуром глифов.
+                    let h = geom_hash(&node.kind);
+                    if text.get(&key).map(|(ph, _)| *ph != h).unwrap_or(true) {
+                        text.insert(key, (h, text_glyphs(&node.kind)));
+                    }
+                    if let Some((_, path)) = text.get(&key) {
+                        scene.fill(Fill::NonZero, screen, brush, None, path);
                     }
                 }
             }

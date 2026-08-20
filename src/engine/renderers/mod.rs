@@ -4,9 +4,10 @@ use super::model::scene::SceneGraph;
 use super::profiler::FrameMetrics;
 use super::transform::Camera;
 use crate::engine::controller::Preview;
-use glam::{Affine2, Vec2};
+use glam::Vec2;
 use ::vello::wgpu;
 
+mod geom;
 mod tiny_skia;
 mod vello;
 
@@ -84,7 +85,7 @@ pub fn create_renderer() -> Box<dyn Renderer> {
     match std::env::var("NATIVE_CANVAS_BACKEND").as_deref() {
         Ok("cpu") => {
             eprintln!("[renderer] tiny-skia (CPU): forced by NATIVE_CANVAS_BACKEND=cpu");
-            return Box::new(TinySkiaRenderer);
+            return Box::new(TinySkiaRenderer::new());
         }
         Ok("gpu") => {
             return match VelloRenderer::new() {
@@ -94,7 +95,7 @@ pub fn create_renderer() -> Box<dyn Renderer> {
                 }
                 Err(e) => {
                     eprintln!("[renderer] vello unavailable, using tiny-skia (CPU): {e}");
-                    Box::new(TinySkiaRenderer)
+                    Box::new(TinySkiaRenderer::new())
                 }
             };
         }
@@ -108,7 +109,7 @@ pub fn create_renderer() -> Box<dyn Renderer> {
                 "[renderer] tiny-skia (CPU): integrated GPU ({}) — vello-буферы жили бы в RAM",
                 info.name
             );
-            Box::new(TinySkiaRenderer)
+            Box::new(TinySkiaRenderer::new())
         }
         Ok(Some(info)) if info.device_type == wgpu::DeviceType::DiscreteGpu => {
             eprintln!("[renderer] vello (GPU): {} detected", info.name);
@@ -116,7 +117,7 @@ pub fn create_renderer() -> Box<dyn Renderer> {
                 Ok(r) => Box::new(r),
                 Err(e) => {
                     eprintln!("[renderer] vello unavailable, using tiny-skia (CPU): {e}");
-                    Box::new(TinySkiaRenderer)
+                    Box::new(TinySkiaRenderer::new())
                 }
             }
         }
@@ -127,7 +128,7 @@ pub fn create_renderer() -> Box<dyn Renderer> {
             }
             Err(e) => {
                 eprintln!("[renderer] vello unavailable, using tiny-skia (CPU): {e}");
-                Box::new(TinySkiaRenderer)
+                Box::new(TinySkiaRenderer::new())
             }
         },
     }
@@ -150,19 +151,7 @@ fn gpu_adapter_info() -> Result<Option<wgpu::AdapterInfo>, Box<dyn std::error::E
 }
 
 /// Мировая ограничивающая рамка по локальной геометрии и трансформации.
-pub(crate) fn world_bbox(kind: &NodeKind, world: Affine2) -> (Vec2, Vec2) {
-    let (lmin, lmax) = kind.local_bbox();
-    let corners = [
-        world.transform_point2(lmin),
-        world.transform_point2(Vec2::new(lmax.x, lmin.y)),
-        world.transform_point2(Vec2::new(lmin.x, lmax.y)),
-        world.transform_point2(lmax),
-    ];
-    let min = corners.iter().copied().reduce(Vec2::min).unwrap_or(lmin);
-    let max = corners.iter().copied().reduce(Vec2::max).unwrap_or(lmax);
-    (min, max)
-}
-
+/// (Для рендера используется кэшированная `SceneGraph::world_bbox`.)
 pub(crate) fn rects_intersect(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
     a0.x <= b1.x && a1.x >= b0.x && a0.y <= b1.y && a1.y >= b0.y
 }

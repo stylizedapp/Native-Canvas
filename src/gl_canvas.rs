@@ -30,6 +30,11 @@ pub fn install(window: &AppWindow, state: &Rc<RefCell<CanvasState>>) {
     let mut th: u32 = 0;
     let mut need_set = false;
     let mut frame_start = Instant::now();
+    // PBO double-buffer upload: пишем в один буфер, пока драйвер копирует
+    // предыдущий в текстуру (перекрытие CPU->GPU с работой рендера).
+    let mut pbos: [Option<glow::NativeBuffer>; 2] = [None, None];
+    let mut pbo_idx = 0usize;
+    let mut pbo_ok = true;
 
     let _ = window.window().set_rendering_notifier(move |event, api| match event {
         RenderingState::RenderingSetup => {
@@ -111,12 +116,53 @@ pub fn install(window: &AppWindow, state: &Rc<RefCell<CanvasState>>) {
                     th = h;
                     need_set = true;
                 }
+                // PBO под размер буфера (пересоздаются вместе с текстурой).
+                for slot in pbos.iter_mut() {
+                    if let Some(b) = *slot {
+                        unsafe {
+                            gl.delete_buffer(b);
+                        }
+                    }
+                    *slot = None;
+                }
+                if pbo_ok {
+                    let size = (w as i32) * (h as i32) * 4;
+                    for slot in pbos.iter_mut() {
+                        match unsafe { gl.create_buffer() } {
+                            Ok(b) => {
+                                unsafe {
+                                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(b));
+                                    gl.buffer_data_size(
+                                        glow::PIXEL_UNPACK_BUFFER,
+                                        size,
+                                        glow::STREAM_DRAW,
+                                    );
+                                    gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+                                }
+                                *slot = Some(b);
+                            }
+                            Err(_) => {
+                                // Драйвер без PBO — остаёмся на прямом upload.
+                                pbo_ok = false;
+                                *slot = None;
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
             if st.present_pending {
                 if let Some(tex) = texture {
                     unsafe {
-                        upload(gl, tex, &st.images[st.cur]);
+                        upload(
+                            gl,
+                            tex,
+                            &st.images[st.cur],
+                            &mut pbos,
+                            &mut pbo_idx,
+                            pbo_ok,
+                        );
                     }
                     st.present_pending = false;
                 }
@@ -155,42 +201,84 @@ pub fn install(window: &AppWindow, state: &Rc<RefCell<CanvasState>>) {
                         gl.delete_texture(tex);
                     }
                 }
+                for slot in pbos.iter_mut() {
+                    if let Some(b) = *slot {
+                        unsafe {
+                            gl.delete_buffer(b);
+                        }
+                    }
+                    *slot = None;
+                }
             }
             texture = None;
+            pbo_idx = 0;
         }
         _ => {}
     });
 }
 
 /// `glTexSubImage2D` буфера в текстуру с сохранением/восстановлением GL-состояния
-/// (документированное требование к колбэкам RenderingNotifier).
+/// (документированное требование к колбэкам RenderingNotifier). Upload идёт через
+/// PBO double-buffer: `glBufferSubData` не блокирует и перекрывается со следующей
+/// записью во второй буфер; при отсутствии PBO — прямой `glTexSubImage2D`.
+#[allow(clippy::too_many_arguments)]
 unsafe fn upload(
     gl: &glow::Context,
     tex: glow::NativeTexture,
     buf: &slint::SharedPixelBuffer<slint::Rgba8Pixel>,
+    pbos: &mut [Option<glow::NativeBuffer>; 2],
+    pbo_idx: &mut usize,
+    pbo_ok: bool,
 ) {
     let (w, h) = (buf.width() as i32, buf.height() as i32);
     let data = buf.as_bytes();
     let active_unit = gl.get_parameter_i32(glow::ACTIVE_TEXTURE);
     let bound = gl.get_parameter_i32(glow::TEXTURE_BINDING_2D);
     let unpack_align = gl.get_parameter_i32(glow::UNPACK_ALIGNMENT);
+    let unpack_pbo = gl.get_parameter_i32(glow::PIXEL_UNPACK_BUFFER_BINDING);
 
     gl.active_texture(glow::TEXTURE0);
     gl.bind_texture(glow::TEXTURE_2D, Some(tex));
     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
-    gl.tex_sub_image_2d(
-        glow::TEXTURE_2D,
-        0,
-        0,
-        0,
-        w,
-        h,
-        glow::RGBA,
-        glow::UNSIGNED_BYTE,
-        glow::PixelUnpackData::Slice(Some(data)),
-    );
+
+    let via_pbo = pbo_ok && pbos[*pbo_idx].is_some();
+    if via_pbo {
+        if let Some(buf) = pbos[*pbo_idx] {
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, Some(buf));
+            gl.buffer_sub_data_u8_slice(glow::PIXEL_UNPACK_BUFFER, 0, data);
+            gl.tex_sub_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                0,
+                0,
+                w,
+                h,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::BufferOffset(0),
+            );
+            gl.bind_buffer(glow::PIXEL_UNPACK_BUFFER, None);
+            *pbo_idx ^= 1;
+        }
+    } else {
+        gl.tex_sub_image_2d(
+            glow::TEXTURE_2D,
+            0,
+            0,
+            0,
+            w,
+            h,
+            glow::RGBA,
+            glow::UNSIGNED_BYTE,
+            glow::PixelUnpackData::Slice(Some(data)),
+        );
+    }
 
     gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, unpack_align);
+    gl.bind_buffer(
+        glow::PIXEL_UNPACK_BUFFER,
+        (unpack_pbo != 0).then(|| glow::NativeBuffer(NonZeroU32::new(unpack_pbo as u32).unwrap())),
+    );
     gl.bind_texture(
         glow::TEXTURE_2D,
         (bound != 0).then(|| glow::NativeTexture(NonZeroU32::new(bound as u32).unwrap())),

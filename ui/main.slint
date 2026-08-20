@@ -123,6 +123,7 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-grid: root.grid-on;
     in-out property <bool> settings-snap: root.snap-on;
     in-out property <string> settings-step: root.grid-step-text;
+    in-out property <string> settings-render-max-dim: "1920";
     in-out property <[ShortcutEditRow]> shortcut-edit-rows;
 
     changed theme-dark => {
@@ -173,6 +174,7 @@ export component AppWindow inherits Window {
     callback settings-set-grid(bool);
     callback settings-set-snap(bool);
     callback settings-set-step(string);
+    callback settings-set-render-max-dim(string);
     callback settings-set-shortcut(string, string);
     callback settings-commit-shortcut(string, string);
     callback reset-shortcuts();
@@ -467,12 +469,14 @@ export component AppWindow inherits Window {
         grid: root.settings-grid;
         snap: root.settings-snap;
         step: root.settings-step;
+        render-max-dim: root.settings-render-max-dim;
         shortcut-rows: root.shortcut-edit-rows;
         close() => { root.close-settings(); }
         set-dark(v) => { root.settings-set-dark(v); }
         set-grid(v) => { root.settings-set-grid(v); }
         set-snap(v) => { root.settings-set-snap(v); }
         set-step(t) => { root.settings-set-step(t); }
+        set-render-max-dim(t) => { root.settings-set-render-max-dim(t); }
         set-shortcut(a, t) => { root.settings-set-shortcut(a, t); }
         commit-shortcut(a, t) => { root.settings-commit-shortcut(a, t); }
         reset-shortcuts() => { root.reset-shortcuts(); }

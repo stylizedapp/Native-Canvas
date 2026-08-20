@@ -1,8 +1,9 @@
 use super::{
-    clips_children, rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, DROP_FILL,
-    DROP_STROKE, GIZMO_HANDLE_FILL, GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN,
-    PAGE_BG, PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
+    clips_children, rects_intersect, RenderOutcome, Renderer, CANVAS_BG, DROP_FILL, DROP_STROKE,
+    GIZMO_HANDLE_FILL, GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN, PAGE_BG,
+    PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
 };
+use super::geom::{geom_hash, grid_key, GridKey};
 use super::super::grid::GridConfig;
 use super::super::model::nodes::{NodeKey, NodeKind, ShapeKind};
 use super::super::model::scene::{SceneGraph, SceneNode};
@@ -12,13 +13,39 @@ use super::super::transform::Camera;
 use crate::engine::controller::Preview;
 use crate::engine::gizmo;
 use glam::{Affine2, Vec2};
+use std::collections::HashMap;
 use std::time::Instant;
 use tiny_skia::{
     Color, FillRule, Paint, PathBuilder, PixmapMut, Rect, Stroke as SkStroke, StrokeDash, Transform,
 };
 
 /// Бэкенд на tiny-skia (CPU-растеризация) — фолбэк, когда GPU недоступен.
-pub struct TinySkiaRenderer;
+pub struct TinySkiaRenderer {
+    /// Кэш контуров узлов: NodeKey -> (хэш геометрии, Path). Для скруглённых
+    /// прямоугольников, эллипсов и текста; обычные прямоугольники идут через
+    /// `fill_rect` без построения Path.
+    paths: HashMap<NodeKey, (u64, tiny_skia::Path)>,
+    /// Длина графа на последнем рендере: структурное изменение чистит `paths`.
+    last_len: usize,
+    /// Кэш пути сетки (переиспользуется при статичной камере).
+    grid: Option<(GridKey, tiny_skia::Path)>,
+}
+
+impl Default for TinySkiaRenderer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TinySkiaRenderer {
+    pub fn new() -> Self {
+        Self {
+            paths: HashMap::new(),
+            last_len: 0,
+            grid: None,
+        }
+    }
+}
 
 impl Renderer for TinySkiaRenderer {
     fn name(&self) -> &'static str {
@@ -43,6 +70,12 @@ impl Renderer for TinySkiaRenderer {
             PixmapMut::from_bytes(out, width, height).expect("pixmap");
         pixmap.fill(Color::from_rgba8(CANVAS_BG[0], CANVAS_BG[1], CANVAS_BG[2], CANVAS_BG[3]));
 
+        // Структурное изменение графа (вставка/удаление/загрузка) — кэш устарел.
+        if scene.len() != self.last_len {
+            self.paths.clear();
+            self.last_len = scene.len();
+        }
+
         let cam = camera.to_affine();
         let cam_ts = Transform::from_row(
             cam.matrix2.x_axis.x,
@@ -60,9 +93,18 @@ impl Renderer for TinySkiaRenderer {
         // Страница (границы холста) — один clipped rect, до нод.
         draw_page(&mut pixmap, cam_ts, camera, view_min, view_max);
 
-        // Сетка — один draw-call, только видимая область.
+        // Сетка — один draw-call, только видимая область. Путь кэшируется
+        // (стабильный при статичной камере — драг узла).
         if grid.visible {
-            draw_grid(&mut pixmap, cam_ts, camera, view_min, view_max, grid.step);
+            draw_grid(
+                &mut pixmap,
+                cam_ts,
+                camera,
+                view_min,
+                view_max,
+                grid.step,
+                &mut self.grid,
+            );
         }
 
         // Однопроходный обход дерева по кэшированным мировым трансформациям (O(n)).
@@ -75,10 +117,12 @@ impl Renderer for TinySkiaRenderer {
                 continue;
             }
             let world = node.world_transform;
-            let (mn, mx) = world_bbox(&node.kind, world);
+            // Кэшированная мировая рамка (flush_transforms) — без повторного
+            // measure текста и конвертации углов.
+            let (mn, mx) = scene.world_bbox(key).unwrap_or((Vec2::ZERO, Vec2::ZERO));
             let visible = rects_intersect(mn, mx, view_min, view_max);
             if visible {
-                draw_node(node, world, cam_ts, camera.zoom, &mut pixmap);
+                draw_node(&mut pixmap, &mut self.paths, key, node, world, cam_ts, camera.zoom);
             }
             // Иерархический culling: у обрезанного контейнера вне вьюпорта детей
             // рисовать незачем; у остальных нод (вырожденный bbox / без clip)
@@ -158,8 +202,17 @@ fn draw_page(pixmap: &mut PixmapMut, cam_ts: Transform, camera: &Camera, view_mi
 }
 
 /// Сетка в мировых координатах, адаптивный шаг (×2, пока шаг на экране < 8px).
-/// Все линии в одном пути — один draw-call.
-fn draw_grid(pixmap: &mut PixmapMut, cam_ts: Transform, camera: &Camera, view_min: Vec2, view_max: Vec2, step: f32) {
+/// Все линии в одном пути — один draw-call. Путь кэшируется до смены камеры/шага.
+#[allow(clippy::too_many_arguments)]
+fn draw_grid(
+    pixmap: &mut PixmapMut,
+    cam_ts: Transform,
+    camera: &Camera,
+    view_min: Vec2,
+    view_max: Vec2,
+    step: f32,
+    cache: &mut Option<(GridKey, tiny_skia::Path)>,
+) {
     let mut s = step.max(1.0);
     while s * camera.zoom < 8.0 {
         s *= 2.0;
@@ -169,29 +222,35 @@ fn draw_grid(pixmap: &mut PixmapMut, cam_ts: Transform, camera: &Camera, view_mi
     let x1 = (view_max.x / s).ceil();
     let y0 = (view_min.y / s).floor();
     let y1 = (view_max.y / s).ceil();
+    let gk = grid_key(s, x0, x1, y0, y1, view_min.x, view_min.y, view_max.x, view_max.y);
 
-    let mut pb = PathBuilder::new();
-    let mut x = x0;
-    while x <= x1 {
-        let wx = x * s;
-        pb.move_to(wx, view_min.y);
-        pb.line_to(wx, view_max.y);
-        x += 1.0;
+    let cached = cache.as_ref().map(|(k, _)| *k == gk).unwrap_or(false);
+    if !cached {
+        let mut pb = PathBuilder::new();
+        let mut x = x0;
+        while x <= x1 {
+            let wx = x * s;
+            pb.move_to(wx, view_min.y);
+            pb.line_to(wx, view_max.y);
+            x += 1.0;
+        }
+        let mut y = y0;
+        while y <= y1 {
+            let wy = y * s;
+            pb.move_to(view_min.x, wy);
+            pb.line_to(view_max.x, wy);
+            y += 1.0;
+        }
+        let Some(path) = pb.finish() else { return };
+        *cache = Some((gk, path));
     }
-    let mut y = y0;
-    while y <= y1 {
-        let wy = y * s;
-        pb.move_to(view_min.x, wy);
-        pb.line_to(view_max.x, wy);
-        y += 1.0;
-    }
-    let Some(path) = pb.finish() else { return };
+    let path = &cache.as_ref().unwrap().1;
 
     let mut sp = Paint::default();
     sp.set_color_rgba8(GRID[0], GRID[1], GRID[2], GRID[3]);
     sp.anti_alias = false;
     let sk = SkStroke { width: 1.0 / camera.zoom, ..Default::default() };
-    pixmap.stroke_path(&path, &sp, &sk, cam_ts, None);
+    pixmap.stroke_path(path, &sp, &sk, cam_ts, None);
 }
 
 /// Добавляет в PathBuilder скруглённый прямоугольник `0..size` с радиусами
@@ -243,7 +302,16 @@ fn push_rounded_rect(pb: &mut PathBuilder, size: Vec2, radii: [f32; 4]) {
     pb.close();
 }
 
-fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pixmap: &mut PixmapMut) {
+#[allow(clippy::too_many_arguments)]
+fn draw_node(
+    pixmap: &mut PixmapMut,
+    paths: &mut HashMap<NodeKey, (u64, tiny_skia::Path)>,
+    key: NodeKey,
+    node: &SceneNode,
+    world: Affine2,
+    cam_ts: Transform,
+    zoom: f32,
+) {
     let combined = cam_ts.pre_concat(Transform::from_row(
         world.matrix2.x_axis.x,
         world.matrix2.x_axis.y,
@@ -254,7 +322,8 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pix
     ));
 
     // Текст: заливка векторных контуров глифов (уже в локальных координатах
-    // узла, мировая трансформация применится через `combined`).
+    // узла, мировая трансформация применится через `combined`). Контур всех
+    // глифов кэшируется и рисуется одним fill_path.
     if let NodeKind::Text { .. } = &node.kind {
         if let Some(f) = solid_fill(node) {
             let a = (f[3] as f32 * node.opacity).round() as u8;
@@ -262,14 +331,8 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pix
                 let mut paint = Paint::default();
                 paint.set_color_rgba8(f[0], f[1], f[2], a);
                 paint.anti_alias = true;
-                let mut pb = PathBuilder::new();
-                for line in crate::engine::text::layout(&node.kind) {
-                    for glyph in &line.glyphs {
-                        push_kurbo_path(&mut pb, glyph);
-                    }
-                }
-                if let Some(path) = pb.finish() {
-                    pixmap.fill_path(&path, &paint, FillRule::Winding, combined, None);
+                if let Some(path) = cached_path(paths, key, &node.kind) {
+                    pixmap.fill_path(path, &paint, FillRule::Winding, combined, None);
                 }
             }
         }
@@ -318,8 +381,8 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pix
         match plain_rect {
             Some(r) => pixmap.fill_rect(r, &paint, combined, None),
             None => {
-                if let Some(path) = build_node_path(&node.kind) {
-                    pixmap.fill_path(&path, &paint, FillRule::Winding, combined, None);
+                if let Some(path) = cached_path(paths, key, &node.kind) {
+                    pixmap.fill_path(path, &paint, FillRule::Winding, combined, None);
                 }
             }
         }
@@ -347,11 +410,46 @@ fn draw_node(node: &SceneNode, world: Affine2, cam_ts: Transform, zoom: f32, pix
                         StrokeDash::new(d, 0.0)
                     },
                 };
-                if let Some(path) = build_node_path(&node.kind) {
-                    pixmap.stroke_path(&path, &sp, &sk, combined, None);
+                if let Some(path) = cached_path(paths, key, &node.kind) {
+                    pixmap.stroke_path(path, &sp, &sk, combined, None);
                 }
             }
         }
+    }
+}
+
+/// Контур узла из кэша, либо построение и вставка. Хэш геометрии инвалидирует
+/// запись при изменении параметров фигуры/текста. Возвращает ссылку на путь
+/// в кэше (без клонирования на каждый кадр).
+fn cached_path<'a>(
+    paths: &'a mut HashMap<NodeKey, (u64, tiny_skia::Path)>,
+    key: NodeKey,
+    kind: &NodeKind,
+) -> Option<&'a tiny_skia::Path> {
+    let h = geom_hash(kind);
+    if paths.get(&key).map(|(ph, _)| *ph != h).unwrap_or(true) {
+        if let Some(p) = build_cached_path(kind) {
+            paths.insert(key, (h, p));
+        }
+    }
+    paths.get(&key).map(|(_, p)| p)
+}
+
+/// Строит контур узла для кэша: текст — все глифы одним путём; фигуры — как
+/// `build_node_path` (обычные прямоугольники в кэш не попадают: они идут
+/// через `fill_rect`).
+fn build_cached_path(kind: &NodeKind) -> Option<tiny_skia::Path> {
+    match kind {
+        NodeKind::Text { .. } => {
+            let mut pb = PathBuilder::new();
+            for line in crate::engine::text::layout(kind) {
+                for glyph in &line.glyphs {
+                    push_kurbo_path(&mut pb, glyph);
+                }
+            }
+            pb.finish()
+        }
+        _ => build_node_path(kind),
     }
 }
 
@@ -565,8 +663,7 @@ mod tests {
     fn render_scene(scene: &SceneGraph) -> Vec<u8> {
         let (w, h) = (160u32, 120u32);
         let mut out = vec![0u8; (w * h * 4) as usize];
-        TinySkiaRenderer
-            .render(
+        TinySkiaRenderer::new().render(
                 scene,
                 &Camera::new(),
                 w,
@@ -766,5 +863,41 @@ mod tests {
             r > 0 && r < 20 && g > 0 && g < 20 && b > 0 && b < 20,
             "rgb = {r},{g},{b}"
         );
+    }
+
+    #[test]
+    fn path_cache_reused_and_invalidated_on_geometry_change() {
+        let mut s = SceneGraph::new();
+        let k = s.insert_root(
+            "R",
+            NodeKind::Shape(ShapeKind::Rectangle {
+                size: Vec2::new(40.0, 30.0),
+                corner_radii: [8.0; 4],
+            }),
+        );
+        if let Some(n) = s.get_mut(k) {
+            n.fills.push(ModelPaint::Solid(ModelColor::from_rgba8(255, 0, 0, 255)));
+        }
+        s.mark_subtree_dirty(k);
+        s.flush_transforms();
+        let mut r = TinySkiaRenderer::new();
+        let (w, h) = (160u32, 120u32);
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        r.render(&s, &Camera::new(), w, h, &[], GridConfig::default(), None, None, None, &mut out);
+        let first = out.clone();
+        // Повторный рендер без изменений: кэш попадает, вывод идентичен.
+        r.render(&s, &Camera::new(), w, h, &[], GridConfig::default(), None, None, None, &mut out);
+        assert_eq!(out, first);
+        // Меняем геометрию (радиус скругления) — хэш меняется, кэш инвалидируется.
+        if let Some(n) = s.get_mut(k) {
+            n.kind = NodeKind::Shape(ShapeKind::Rectangle {
+                size: Vec2::new(40.0, 30.0),
+                corner_radii: [0.0; 4],
+            });
+        }
+        s.mark_subtree_dirty(k);
+        s.flush_transforms();
+        r.render(&s, &Camera::new(), w, h, &[], GridConfig::default(), None, None, None, &mut out);
+        assert_ne!(out, first);
     }
 }

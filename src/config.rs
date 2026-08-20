@@ -13,7 +13,15 @@ pub struct AppConfig {
     pub grid_visible: bool,
     pub snap_on: bool,
     pub grid_step: f32,
+    /// Кэп длинной стороны буфера рендера в пикселях (0 = без кэпа).
+    /// Дефолт при отсутствии поля в старом config.json — `default_render_max_dim`.
+    #[serde(default = "default_render_max_dim")]
+    pub render_max_dim: u32,
     pub shortcuts: ShortcutMap,
+}
+
+fn default_render_max_dim() -> u32 {
+    1920
 }
 
 impl Default for AppConfig {
@@ -23,6 +31,7 @@ impl Default for AppConfig {
             grid_visible: true,
             snap_on: true,
             grid_step: 8.0,
+            render_max_dim: default_render_max_dim(),
             shortcuts: Vec::new(),
         }
     }
@@ -66,6 +75,7 @@ mod tests {
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert!(!back.dark_theme);
         assert_eq!(back.grid_step, 8.0);
+        assert_eq!(back.render_max_dim, 1920);
         assert!(back.shortcuts.is_empty());
     }
 }

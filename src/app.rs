@@ -76,6 +76,8 @@ pub fn run() -> Result<(), slint::PlatformError> {
         window.set_grid_on(cfg.grid_visible);
         window.set_snap_on(cfg.snap_on);
         window.set_grid_step_text(fmt_step(cfg.grid_step).into());
+        state.borrow_mut().render_max_dim = cfg.render_max_dim as f32;
+        window.set_settings_render_max_dim(format!("{}", cfg.render_max_dim).into());
     }
     rebuild_shortcut_rows(&window, &shortcut_map);
 
@@ -866,12 +868,15 @@ pub fn run() -> Result<(), slint::PlatformError> {
     {
         let weak = window.as_weak();
         let profiler = profiler.clone();
+        let state = state.clone();
         window.on_toggle_debug(move || {
             if let Some(w) = weak.upgrade() {
                 let show = !w.get_debug_show();
                 w.set_debug_show(show);
                 if show {
-                    let snapshot = profiler.borrow().take_snapshot();
+                    let snapshot = profiler
+                        .borrow()
+                        .take_snapshot(&state.borrow().presentation_summary());
                     eprintln!("[profile]\n{snapshot}");
                     w.set_debug_text(snapshot.into());
                 }
@@ -973,6 +978,25 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     config.borrow_mut().grid_step = step;
                     config::save(&config.borrow());
                     render();
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let config = config.clone();
+        let state = state.clone();
+        let render = render.clone();
+        window.on_settings_set_render_max_dim(move |t| {
+            if let Ok(v) = t.trim().parse::<u32>() {
+                if (800..=3840).contains(&v) {
+                    if let Some(w) = weak.upgrade() {
+                        config.borrow_mut().render_max_dim = v;
+                        config::save(&config.borrow());
+                        state.borrow_mut().render_max_dim = v as f32;
+                        w.set_settings_render_max_dim(format!("{v}").into());
+                        render();
+                    }
                 }
             }
         });
