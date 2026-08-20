@@ -17,6 +17,7 @@ pub mod action {
     pub const ELLIPSE: &str = "ellipse";
     pub const LINE: &str = "line";
     pub const FRAME: &str = "frame";
+    pub const TEXT: &str = "text";
     pub const GRID: &str = "grid";
     pub const SNAP: &str = "snap";
     pub const UNDO: &str = "undo";
@@ -50,6 +51,7 @@ pub mod action {
     pub const PASTE: &str = "paste";
     pub const PASTE_IN_PLACE: &str = "paste-in-place";
     pub const DUPLICATE: &str = "duplicate";
+    pub const WRAP_IN_FRAME: &str = "wrap-in-frame";
 }
 
 /// Комбинация клавиш. `key` — канонический символ в нижнем регистре
@@ -88,6 +90,7 @@ pub const ALL_ACTIONS: &[&str] = &[
     action::ELLIPSE,
     action::LINE,
     action::FRAME,
+    action::TEXT,
     action::GRID,
     action::SNAP,
     action::UNDO,
@@ -102,6 +105,7 @@ pub const ALL_ACTIONS: &[&str] = &[
     action::ZOOM_OUT,
     action::PALETTE,
     action::HELP,
+    action::WRAP_IN_FRAME,
 ];
 
 /// Строка комбинаций действия (для настроек/справки): «Ctrl+Shift+Z».
@@ -162,6 +166,7 @@ pub fn default_shortcuts() -> ShortcutMap {
         (action::ELLIPSE.to_string(), vec![Shortcut::plain("o")]),
         (action::LINE.to_string(), vec![Shortcut::plain("l")]),
         (action::FRAME.to_string(), vec![Shortcut::plain("f")]),
+        (action::TEXT.to_string(), vec![Shortcut::plain("t")]),
         (action::GRID.to_string(), vec![Shortcut::plain("g")]),
         (action::SNAP.to_string(), vec![Shortcut::shift("g")]),
         (action::UNDO.to_string(), vec![Shortcut::ctrl("z")]),
@@ -181,6 +186,7 @@ pub fn default_shortcuts() -> ShortcutMap {
         (action::PASTE.to_string(), vec![Shortcut::ctrl("v")]),
         (action::PASTE_IN_PLACE.to_string(), vec![Shortcut::shift("v")]),
         (action::DUPLICATE.to_string(), vec![Shortcut::ctrl("d")]),
+        (action::WRAP_IN_FRAME.to_string(), vec![Shortcut { ctrl: true, shift: false, alt: true, key: "g".into() }]),
         (action::NUDGE_LEFT.to_string(), vec![Shortcut::plain("arrowleft")]),
         (action::NUDGE_RIGHT.to_string(), vec![Shortcut::plain("arrowright")]),
         (action::NUDGE_UP.to_string(), vec![Shortcut::plain("arrowup")]),

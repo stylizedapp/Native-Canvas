@@ -6,7 +6,7 @@ use crate::engine::expr;
 use crate::engine::controller::CanvasController;
 use crate::engine::model::nodes::{NodeKey, NodeKind, ShapeKind};
 use crate::engine::model::scene::SceneNode;
-use crate::engine::model::types::{Color, Paint};
+use crate::engine::model::types::{Color, Paint, TextAlign};
 use crate::engine::profiler::FrameProfiler;
 use crate::engine::renderers::Renderer;
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
@@ -64,16 +64,22 @@ pub struct CanvasState {
     pub last_sel_corner_tr: String,
     pub last_sel_corner_br: String,
     pub last_sel_corner_bl: String,
+    pub last_sel_corner_text: String,
+    pub last_sel_corner_expanded: bool,
     pub last_layout_gap: String,
     pub last_layout_padding: String,
+    pub last_font_size: String,
+    pub last_text_align: i32,
     // Момент последнего ввода пользователя в каждое поле (защита от затирания).
-    pub sel_edited_at: [Option<Instant>; 15],
+    pub sel_edited_at: [Option<Instant>; 17],
     /// Кэш текста-плейсхолдера инспектора (мультивыделение).
     pub last_sel_hint: String,
     /// Узел, который пользователь перетаскивает в панели слоёв (drag-reorder).
     pub dragged_layer: Option<NodeKey>,
     /// Узел под ПКМ в панели слоёв (для «Rename» из контекстного меню).
     pub context_target: Option<NodeKey>,
+    /// Узел, текст которого редактируется инлайн-оверлеем (для детекта старта).
+    pub editing_key: Option<NodeKey>,
     /// Зажат пробел (Space+Drag = временный Pan).
     pub space_held: bool,
 }
@@ -96,6 +102,8 @@ enum SelField {
     CornerBL = 12,
     LayoutGap = 13,
     LayoutPadding = 14,
+    CornerUniform = 15,
+    FontSize = 16,
 }
 
 impl CanvasState {
@@ -130,12 +138,17 @@ impl CanvasState {
             last_sel_corner_tr: String::new(),
             last_sel_corner_br: String::new(),
             last_sel_corner_bl: String::new(),
+            last_sel_corner_text: String::new(),
+            last_sel_corner_expanded: false,
             last_layout_gap: String::new(),
             last_layout_padding: String::new(),
-            sel_edited_at: [None; 15],
+            last_font_size: String::new(),
+            last_text_align: 0,
+            sel_edited_at: [None; 17],
             last_sel_hint: String::new(),
             dragged_layer: None,
             context_target: None,
+            editing_key: None,
             space_held: false,
         }
     }
@@ -193,6 +206,36 @@ pub fn sync(
     let mut c = controller.borrow_mut();
     let mut st = state.borrow_mut();
 
+    // Инлайн-редактор текста: оверлей в экранных координатах (слой Slint).
+    // Текст в поле пишется только при старте редактирования — дальше поле
+    // содержит введённое пользователем, и перезаписывать его нельзя.
+    match c.editing_view() {
+        Some((content, pos, size, font_size, color)) => {
+            if st.editing_key != c.editing {
+                st.editing_key = c.editing;
+                w.set_editing_text(true);
+                w.set_edit_x(pos.x);
+                w.set_edit_y(pos.y);
+                w.set_edit_w(size.x.max(40.0));
+                w.set_edit_h(size.y.max(8.0));
+                w.set_edit_font_size(font_size);
+                w.set_edit_color(slint_color(color.to_rgba8()));
+                w.set_edit_text(content.into());
+            }
+            // Живая перестройка позиции/размера (AutoWidth растёт при вводе).
+            w.set_edit_x(pos.x);
+            w.set_edit_y(pos.y);
+            w.set_edit_w(size.x.max(40.0));
+            w.set_edit_h(size.y.max(8.0));
+            w.set_edit_font_size(font_size);
+        }
+        None => {
+            if st.editing_key.take().is_some() || w.get_editing_text() {
+                w.set_editing_text(false);
+            }
+        }
+    }
+
     // On-demand: ничего не менялось и размер прежний — рендер не нужен.
     let size_changed = st.ensure(bw, bh);
 
@@ -227,6 +270,7 @@ pub fn sync(
             c.grid,
             c.preview.clone(),
             c.marquee,
+            c.hovered_frame,
             bytes,
         )
     };
@@ -304,7 +348,7 @@ pub fn sync(
         st.last_sel_corner_tr.clear();
         st.last_sel_corner_br.clear();
         st.last_sel_corner_bl.clear();
-        st.sel_edited_at = [None; 15];
+        st.sel_edited_at = [None; 17];
     }
     // Одиночный выбор — обычные поля; мультивыбор — X/Y/W/H показывают общую
     // рамку группы, остальные свойства — от первого узла.
@@ -374,9 +418,51 @@ fn mark_edited(st: &Rc<RefCell<CanvasState>>, field: SelField) {
     st.borrow_mut().sel_edited_at[field as usize] = Some(Instant::now());
 }
 
+/// Commit поля (Enter): сбрасываем cooldown, чтобы следующая правка началась
+/// с новой undo-точки (подтверждённое значение больше не «склеивается»).
+fn mark_committed(st: &Rc<RefCell<CanvasState>>, field: SelField) {
+    st.borrow_mut().sel_edited_at[field as usize] = None;
+}
+
 /// Числовой ввод из инспектора: чистое число или арифметика «как в Figma».
 fn parse_num(s: &str) -> Option<f32> {
     expr::eval(s)
+}
+
+/// Разрешает значение поля размера: `50%` — процент от размера родительского
+/// фрейма по нужной оси (как в Figma); без родителя процент = 0.
+fn resolve_w(v: &str, c: &Controller) -> Option<f32> {
+    match expr::parse(v) {
+        Some(expr::Value::Percent(f)) => {
+            let base = c.borrow().parent_frame_size().map(|s| s.x).unwrap_or(0.0);
+            Some(f * base)
+        }
+        Some(expr::Value::Plain(n)) => Some(n),
+        None => None,
+    }
+}
+
+fn resolve_h(v: &str, c: &Controller) -> Option<f32> {
+    match expr::parse(v) {
+        Some(expr::Value::Percent(f)) => {
+            let base = c.borrow().parent_frame_size().map(|s| s.y).unwrap_or(0.0);
+            Some(f * base)
+        }
+        Some(expr::Value::Plain(n)) => Some(n),
+        None => None,
+    }
+}
+
+/// Разрешает радиус скругления: `50%` — процент от меньшей стороны фигуры.
+fn resolve_corner(v: &str, c: &Controller) -> Option<f32> {
+    match expr::parse(v) {
+        Some(expr::Value::Percent(f)) => {
+            let base = c.borrow().corner_percent_base().unwrap_or(0.0);
+            Some(f * base)
+        }
+        Some(expr::Value::Plain(n)) => Some(n),
+        None => None,
+    }
 }
 
 /// Undo-точка для live-правки: на первый ввод сессии поля, а для текстовых
@@ -444,7 +530,7 @@ pub fn register_inspector_callbacks(
     let st = state.clone();
     let rr = Rc::clone(render);
     window.on_live_w(move |v| {
-        if let Some(w) = parse_num(&v) {
+        if let Some(w) = resolve_w(&v, &c) {
             record_edit_start(&c, &st, SelField::W, v.as_str(), false);
             if c.borrow().scene.selection().len() > 1 {
                 // Мультивыбор: W = масштаб группы относительно её центра.
@@ -465,7 +551,7 @@ pub fn register_inspector_callbacks(
     let st = state.clone();
     let rr = Rc::clone(render);
     window.on_live_h(move |v| {
-        if let Some(h) = parse_num(&v) {
+        if let Some(h) = resolve_h(&v, &c) {
             record_edit_start(&c, &st, SelField::H, v.as_str(), false);
             if c.borrow().scene.selection().len() > 1 {
                 if let Some((_, _, lw, _)) = sel_bbox_now(&c) {
@@ -551,7 +637,7 @@ pub fn register_inspector_callbacks(
         let st = state.clone();
         let rr = Rc::clone(render);
         window.on_live_corner(move |i, v| {
-            if let Some(r) = parse_num(&v) {
+            if let Some(r) = resolve_corner(&v, &c) {
                 let field = match i {
                     0 => SelField::CornerTL,
                     1 => SelField::CornerTR,
@@ -560,6 +646,79 @@ pub fn register_inspector_callbacks(
                 };
                 record_edit_start(&c, &st, field, v.as_str(), false);
                 c.borrow_mut().apply_corner_radius_live(i as usize, r);
+                refresh_sel(&weak, &c);
+            }
+            rr();
+        });
+    }
+    {
+        let c = controller.clone();
+        let weak = window.as_weak();
+        let st = state.clone();
+        let rr = Rc::clone(render);
+        window.on_live_corner_uniform(move |v| {
+            if let Some(r) = resolve_corner(&v, &c) {
+                record_edit_start(&c, &st, SelField::CornerUniform, v.as_str(), false);
+                c.borrow_mut().apply_corner_radius_uniform(r);
+                refresh_sel(&weak, &c);
+            }
+            rr();
+        });
+    }
+    {
+        let c = controller.clone();
+        let weak = window.as_weak();
+        let st = state.clone();
+        let rr = Rc::clone(render);
+        window.on_scrub_corner_uniform(move |delta| {
+            if c.borrow().scene.selection().is_empty() {
+                return;
+            }
+            record_edit_start(&c, &st, SelField::CornerUniform, "", false);
+            let cur = c.borrow().corners().unwrap_or([0.0; 4]);
+            c.borrow_mut().apply_corner_radius_uniform(cur[0].max(0.0) + delta);
+            refresh_sel(&weak, &c);
+            rr();
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let st = state.clone();
+        let rr = Rc::clone(render);
+        window.on_toggle_corner_expand(move || {
+            let mut st = st.borrow_mut();
+            st.last_sel_corner_expanded = !st.last_sel_corner_expanded;
+            weak.upgrade()
+                .map(|w| w.set_sel_corner_expanded(st.last_sel_corner_expanded));
+            rr();
+        });
+    }
+    {
+        let c = controller.clone();
+        let weak = window.as_weak();
+        let st = state.clone();
+        let rr = Rc::clone(render);
+        window.on_commit_field(move |i| {
+            let field = match i {
+                0 => SelField::X,
+                1 => SelField::Y,
+                2 => SelField::W,
+                3 => SelField::H,
+                4 => SelField::Rotation,
+                5 => SelField::Opacity,
+                8 => SelField::StrokeWidth,
+                9 => SelField::CornerTL,
+                10 => SelField::CornerTR,
+                11 => SelField::CornerBR,
+                12 => SelField::CornerBL,
+                13 => SelField::LayoutGap,
+                14 => SelField::LayoutPadding,
+                15 => SelField::CornerUniform,
+                16 => SelField::FontSize,
+                _ => return,
+            };
+            mark_committed(&st, field);
+            if !c.borrow().scene.selection().is_empty() {
                 refresh_sel(&weak, &c);
             }
             rr();
@@ -670,12 +829,67 @@ pub fn register_inspector_callbacks(
         let weak = window.as_weak();
         let rr = Rc::clone(render);
         window.on_set_layout_mode(move |mode| {
-            let cur = c.borrow().frame_auto_layout().map(|cfg| match cfg.direction {
-                crate::engine::model::types::LayoutDirection::Horizontal => 1,
-                crate::engine::model::types::LayoutDirection::Vertical => 2,
-            }).unwrap_or(0);
+            let cur = c.borrow().frame_auto_layout().map(|_| 1).unwrap_or(0);
             if mode != cur {
                 c.borrow_mut().set_auto_layout_mode(mode as u8);
+            }
+            refresh_sel(&weak, &c);
+            rr();
+        });
+        let c = controller.clone();
+        let weak = window.as_weak();
+        let rr = Rc::clone(render);
+        window.on_set_layout_direction(move |d| {
+            let cur = c
+                .borrow()
+                .frame_auto_layout()
+                .map(|cfg| match cfg.direction {
+                    crate::engine::model::types::LayoutDirection::Horizontal => 0,
+                    crate::engine::model::types::LayoutDirection::Vertical => 1,
+                })
+                .unwrap_or(0);
+            if d != cur {
+                c.borrow_mut().set_auto_layout_direction(d as u8);
+            }
+            refresh_sel(&weak, &c);
+            rr();
+        });
+        let c = controller.clone();
+        let weak = window.as_weak();
+        let rr = Rc::clone(render);
+        window.on_set_layout_align(move |a| {
+            let cur = c
+                .borrow()
+                .frame_auto_layout()
+                .map(|cfg| match cfg.align_items {
+                    crate::engine::model::types::LayoutAlign::Stretch => 0,
+                    crate::engine::model::types::LayoutAlign::Min => 1,
+                    crate::engine::model::types::LayoutAlign::Center => 2,
+                    crate::engine::model::types::LayoutAlign::Max => 3,
+                })
+                .unwrap_or(0);
+            if a != cur {
+                c.borrow_mut().apply_auto_layout_align(a as u8);
+            }
+            refresh_sel(&weak, &c);
+            rr();
+        });
+        let c = controller.clone();
+        let weak = window.as_weak();
+        let rr = Rc::clone(render);
+        window.on_set_layout_justify(move |j| {
+            let cur = c
+                .borrow()
+                .frame_auto_layout()
+                .map(|cfg| match cfg.justify_content {
+                    crate::engine::model::types::LayoutJustify::Min => 0,
+                    crate::engine::model::types::LayoutJustify::Center => 1,
+                    crate::engine::model::types::LayoutJustify::Max => 2,
+                    crate::engine::model::types::LayoutJustify::SpaceBetween => 3,
+                })
+                .unwrap_or(0);
+            if j != cur {
+                c.borrow_mut().apply_auto_layout_justify(j as u8);
             }
             refresh_sel(&weak, &c);
             rr();
@@ -702,6 +916,31 @@ pub fn register_inspector_callbacks(
                 c.borrow_mut().apply_auto_layout_padding_live(p);
                 refresh_sel(&weak, &c);
             }
+            rr();
+        });
+        // --- Текст: размер шрифта и выравнивание ---
+        let c = controller.clone();
+        let weak = window.as_weak();
+        let st = state.clone();
+        let rr = Rc::clone(render);
+        window.on_live_font_size(move |v| {
+            if let Some(fs) = parse_num(&v) {
+                record_edit_start(&c, &st, SelField::FontSize, v.as_str(), false);
+                c.borrow_mut().apply_font_size_live(fs);
+                refresh_sel(&weak, &c);
+            }
+            rr();
+        });
+        let c = controller.clone();
+        let rr = Rc::clone(render);
+        window.on_set_text_align(move |a| {
+            let align = match a {
+                1 => TextAlign::Center,
+                2 => TextAlign::Right,
+                3 => TextAlign::Justified,
+                _ => TextAlign::Left,
+            };
+            c.borrow_mut().set_text_align(align);
             rr();
         });
         let c = controller.clone();
@@ -1019,6 +1258,10 @@ fn dims(kind: &NodeKind) -> (f32, f32) {
         NodeKind::Frame { size, .. } => (size.x, size.y),
         NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => (size.x, size.y),
         NodeKind::Shape(ShapeKind::Ellipse { radii, .. }) => (radii.x, radii.y),
+        NodeKind::Text { .. } => {
+            let s = crate::engine::text::measure(kind);
+            (s.x, s.y)
+        }
         _ => (0.0, 0.0),
     }
 }
@@ -1086,28 +1329,83 @@ fn update_sel(w: &AppWindow, n: &SceneNode, st: &mut CanvasState, xywh: (f32, f3
         upd_field(w, &mut st.last_sel_corner_tr, &mut st.sel_edited_at[SelField::CornerTR as usize], now, fmt_num(r[1]), AppWindow::set_sel_corner_tr_text);
         upd_field(w, &mut st.last_sel_corner_br, &mut st.sel_edited_at[SelField::CornerBR as usize], now, fmt_num(r[2]), AppWindow::set_sel_corner_br_text);
         upd_field(w, &mut st.last_sel_corner_bl, &mut st.sel_edited_at[SelField::CornerBL as usize], now, fmt_num(r[3]), AppWindow::set_sel_corner_bl_text);
+        // Свёрнутое единое поле: значение = TL (как в Figma, при разных углах
+        // Figma показывает среднее/—; показываем TL).
+        let uniform = if r[0] == r[1] && r[1] == r[2] && r[2] == r[3] {
+            fmt_num(r[0])
+        } else {
+            "—".into()
+        };
+        upd_field(w, &mut st.last_sel_corner_text, &mut st.sel_edited_at[SelField::CornerUniform as usize], now, uniform, AppWindow::set_sel_corner_text);
     } else {
         // Виды без скругления: показываем «—».
         upd_field(w, &mut st.last_sel_corner_tl, &mut st.sel_edited_at[SelField::CornerTL as usize], now, "—".into(), AppWindow::set_sel_corner_tl_text);
         upd_field(w, &mut st.last_sel_corner_tr, &mut st.sel_edited_at[SelField::CornerTR as usize], now, "—".into(), AppWindow::set_sel_corner_tr_text);
         upd_field(w, &mut st.last_sel_corner_br, &mut st.sel_edited_at[SelField::CornerBR as usize], now, "—".into(), AppWindow::set_sel_corner_br_text);
         upd_field(w, &mut st.last_sel_corner_bl, &mut st.sel_edited_at[SelField::CornerBL as usize], now, "—".into(), AppWindow::set_sel_corner_bl_text);
+        upd_field(w, &mut st.last_sel_corner_text, &mut st.sel_edited_at[SelField::CornerUniform as usize], now, "—".into(), AppWindow::set_sel_corner_text);
     }
+    w.set_sel_corner_expanded(st.last_sel_corner_expanded);
     // Auto layout (Frame).
     w.set_is_frame(matches!(n.kind, NodeKind::Frame { .. }));
-    let (mode, gap, pad) = match &n.kind {
+    let (mode, dir, align, justify, gap, pad) = match &n.kind {
         NodeKind::Frame { auto_layout: Some(cfg), .. } => {
-            let mode = match cfg.direction {
-                crate::engine::model::types::LayoutDirection::Horizontal => 1,
-                crate::engine::model::types::LayoutDirection::Vertical => 2,
+            let mode = 1;
+            let dir = match cfg.direction {
+                crate::engine::model::types::LayoutDirection::Horizontal => 0,
+                crate::engine::model::types::LayoutDirection::Vertical => 1,
             };
-            (mode, fmt_num(cfg.spacing), fmt_num(cfg.padding[0]))
+            let align = match cfg.align_items {
+                crate::engine::model::types::LayoutAlign::Stretch => 0,
+                crate::engine::model::types::LayoutAlign::Min => 1,
+                crate::engine::model::types::LayoutAlign::Center => 2,
+                crate::engine::model::types::LayoutAlign::Max => 3,
+            };
+            let justify = match cfg.justify_content {
+                crate::engine::model::types::LayoutJustify::Min => 0,
+                crate::engine::model::types::LayoutJustify::Center => 1,
+                crate::engine::model::types::LayoutJustify::Max => 2,
+                crate::engine::model::types::LayoutJustify::SpaceBetween => 3,
+            };
+            (mode, dir, align, justify, fmt_num(cfg.spacing), fmt_num(cfg.padding[0]))
         }
-        _ => (0, fmt_num(0.0), fmt_num(0.0)),
+        _ => (0, 0, 0, 0, fmt_num(0.0), fmt_num(0.0)),
     };
     w.set_layout_mode(mode);
+    w.set_sel_layout_direction(dir);
+    w.set_sel_layout_align(align);
+    w.set_sel_layout_justify(justify);
     upd_field(w, &mut st.last_layout_gap, &mut st.sel_edited_at[SelField::LayoutGap as usize], now, gap, AppWindow::set_sel_layout_gap);
     upd_field(w, &mut st.last_layout_padding, &mut st.sel_edited_at[SelField::LayoutPadding as usize], now, pad, AppWindow::set_sel_layout_padding);
+    // Текст (Text-узел).
+    match &n.kind {
+        NodeKind::Text { font_size, align, .. } => {
+            w.set_is_text(true);
+            upd_field(
+                w,
+                &mut st.last_font_size,
+                &mut st.sel_edited_at[SelField::FontSize as usize],
+                now,
+                fmt_num(*font_size),
+                AppWindow::set_sel_font_size_text,
+            );
+            let a = match align {
+                TextAlign::Left => 0,
+                TextAlign::Center => 1,
+                TextAlign::Right => 2,
+                TextAlign::Justified => 3,
+            };
+            if a != st.last_text_align {
+                st.last_text_align = a;
+                w.set_sel_align(a);
+            }
+        }
+        _ => {
+            w.set_is_text(false);
+            w.set_sel_align(0);
+            st.last_text_align = 0;
+        }
+    }
 }
 
 /// Заполняет поля инспектора из узла (после commit; `xywh` — отображаемые
@@ -1137,6 +1435,23 @@ fn set_sel_texts(w: &AppWindow, n: &SceneNode, xywh: (f32, f32, f32, f32)) {
         w.set_sel_corner_tr_text("—".into());
         w.set_sel_corner_br_text("—".into());
         w.set_sel_corner_bl_text("—".into());
+    }
+    match &n.kind {
+        NodeKind::Text { font_size, align, .. } => {
+            w.set_is_text(true);
+            w.set_sel_font_size_text(fmt_num(*font_size).into());
+            let a = match align {
+                TextAlign::Left => 0,
+                TextAlign::Center => 1,
+                TextAlign::Right => 2,
+                TextAlign::Justified => 3,
+            };
+            w.set_sel_align(a);
+        }
+        _ => {
+            w.set_is_text(false);
+            w.set_sel_align(0);
+        }
     }
 }
 

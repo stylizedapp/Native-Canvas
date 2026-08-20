@@ -256,6 +256,24 @@ pub fn run() -> Result<(), slint::PlatformError> {
             render();
         });
     }
+    {
+        // Инлайн-редактирование текста: live-обновление модели на каждый ввод.
+        let controller = controller.clone();
+        let render = render.clone();
+        window.on_edit_text_changed(move |t| {
+            controller.borrow_mut().set_editing_text(t.as_str());
+            render();
+        });
+    }
+    {
+        // Завершение редактирования (Enter/Esc в оверлее).
+        let controller = controller.clone();
+        let render = render.clone();
+        window.on_edit_finished(move || {
+            controller.borrow_mut().end_text_edit();
+            render();
+        });
+    }
 
     // --- Контекстное меню (ПКМ) ---
     fn canvas_menu_entries(c: &CanvasController) -> Vec<ContextMenuEntry> {
@@ -287,6 +305,20 @@ pub fn run() -> Result<(), slint::PlatformError> {
                 ContextMenuEntry { id: "bring-forward".into(), text: "Bring forward".into(), enabled: true },
                 ContextMenuEntry { id: "send-backward".into(), text: "Send backward".into(), enabled: true },
                 ContextMenuEntry {
+                    id: "wrap-in-frame".into(),
+                    text: "Frame selection".into(),
+                    enabled: true,
+                },
+                ContextMenuEntry {
+                    id: "unframe".into(),
+                    text: "Move out of frame".into(),
+                    enabled: c
+                        .scene
+                        .selection()
+                        .iter()
+                        .any(|k| c.scene.get(*k).and_then(|n| n.parent).is_some()),
+                },
+                ContextMenuEntry {
                     id: "lock".into(),
                     text: if locked { "Unlock".into() } else { "Lock".into() },
                     enabled: true,
@@ -307,6 +339,16 @@ pub fn run() -> Result<(), slint::PlatformError> {
             ContextMenuEntry { id: "rename".into(), text: "Rename".into(), enabled: true },
             ContextMenuEntry { id: "duplicate".into(), text: "Duplicate".into(), enabled: true },
             ContextMenuEntry { id: "delete".into(), text: "Delete".into(), enabled: true },
+            ContextMenuEntry {
+                id: "wrap-in-frame".into(),
+                text: "Frame selection".into(),
+                enabled: true,
+            },
+            ContextMenuEntry {
+                id: "unframe".into(),
+                text: "Move out of frame".into(),
+                enabled: c.scene.get(key).and_then(|n| n.parent).is_some(),
+            },
             ContextMenuEntry {
                 id: "lock".into(),
                 text: if locked { "Unlock".into() } else { "Lock".into() },
@@ -377,6 +419,13 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     "delete" => c.delete_selection(),
                     "bring-forward" => c.bring_forward_selection(),
                     "send-backward" => c.send_backward_selection(),
+                    "wrap-in-frame" => {
+                        if let Some(key) = state.borrow().context_target {
+                            c.scene.set_selection(vec![key]);
+                        }
+                        c.wrap_in_frame();
+                    }
+                    "unframe" => c.reparent_selection(None),
                     "lock" => c.toggle_lock_selection(),
                     "hide" => c.toggle_hide_selection(),
                     "select-all" => c.select_all(),
@@ -618,6 +667,10 @@ pub fn run() -> Result<(), slint::PlatformError> {
                     controller.borrow_mut().duplicate_selection();
                     render();
                 }
+                a::WRAP_IN_FRAME => {
+                    controller.borrow_mut().wrap_in_frame();
+                    render();
+                }
                 _ => {}
             }
         });
@@ -836,7 +889,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let render = render.clone();
         window.on_settings_set_grid(move |v| {
             if let Some(w) = weak.upgrade() {
-                controller.borrow_mut().grid.visible = v;
+                controller.borrow_mut().set_grid_visible(v);
                 w.set_grid_on(v);
                 config.borrow_mut().grid_visible = v;
                 config::save(&config.borrow());
@@ -851,7 +904,7 @@ pub fn run() -> Result<(), slint::PlatformError> {
         let render = render.clone();
         window.on_settings_set_snap(move |v| {
             if let Some(w) = weak.upgrade() {
-                controller.borrow_mut().grid.snap = v;
+                controller.borrow_mut().set_snap(v);
                 w.set_snap_on(v);
                 config.borrow_mut().snap_on = v;
                 config::save(&config.borrow());

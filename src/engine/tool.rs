@@ -7,6 +7,7 @@ pub enum Tool {
     Ellipse,
     Line,
     Frame,
+    Text,
 }
 
 impl Tool {
@@ -17,6 +18,7 @@ impl Tool {
             "ellipse" => Tool::Ellipse,
             "line" => Tool::Line,
             "frame" => Tool::Frame,
+            "text" => Tool::Text,
             _ => Tool::Select,
         }
     }
@@ -29,6 +31,7 @@ impl Tool {
             Tool::Ellipse => "ellipse",
             Tool::Line => "line",
             Tool::Frame => "frame",
+            Tool::Text => "text",
         }
     }
 }

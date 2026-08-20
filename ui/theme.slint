@@ -1,9 +1,17 @@
 // Централизованная дизайн-система "Bento".
 // Все цвета/отступы/радиусы/шрифты — только здесь. Правка токенов = новый стиль.
 // Тема: `dark` переключает обе палитры (Obsidian и светлая Slate).
+
+// Офлайн-шрифт Inter: регистрируется в рендерере при старте (Slint подхватывает
+// ttf-import и вызывает register_font_from_path). Семейство — "Inter".
+import "../assets/fonts/inter.ttf";
+
 export global Theme {
     // --- Флаг темы (Dark / Light) ---
     in-out property <bool> dark: false;
+
+    // --- Typography ---
+    in-out property <string> font-family: "Inter";
 
     // --- Surfaces ---
     in-out property <brush> bg: self.dark ? #0d0e12 : #eef1f6;

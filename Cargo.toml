@@ -17,6 +17,7 @@ pollster = "0.4" # Синхронное ожидание wgpu-фьючеров �
 slotmap = { version = "1.0", features = ["serde"] }
 glam = { version = "0.29", features = ["serde"] } # Быстрая 2D/3D линейная алгебра и матрицы
 kurbo = { version = "0.13", features = ["serde"] } # Кривые Безье и контуры (единая версия с vello)
+ab_glyph = "0.2" # Растеризация/контуры глифов для текстовых узлов (уже в дереве через vello)
 
 # Native File Dialogs (Сохранить / Открыть)
 rfd = "0.15"
@@ -50,7 +51,7 @@ debug = false          # Полный запрет генерации .pdb/.dwar
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"
+codegen-units = 8
 panic = "abort"
 strip = true

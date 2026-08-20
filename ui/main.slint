@@ -53,9 +53,17 @@ export component AppWindow inherits Window {
     in-out property <string> sel-corner-tr-text: "";
     in-out property <string> sel-corner-br-text: "";
     in-out property <string> sel-corner-bl-text: "";
+    in-out property <string> sel-corner-text: "";
+    in-out property <bool> sel-corner-expanded: false;
     // Auto layout (Frame): есть ли выбранный фрейм, режим и параметры.
     in-out property <bool> is-frame: false;
+    in-out property <bool> is-text: false;
+    in-out property <string> sel-font-size-text: "";
+    in-out property <int> sel-align: 0;
     in-out property <int> layout-mode: 0;
+    in-out property <int> sel-layout-direction: 0;
+    in-out property <int> sel-layout-align: 0;
+    in-out property <int> sel-layout-justify: 0;
     in-out property <string> sel-layout-gap: "";
     in-out property <string> sel-layout-padding: "";
     // Направление пикера: заливка или обводка.
@@ -76,6 +84,15 @@ export component AppWindow inherits Window {
     in-out property <[color]> picker-swatches;
     // Gizmo: имя хэндла под курсором (маппинг курсора в canvas_view.slint).
     in-out property <string> hovered-handle: "";
+    // Инлайн-редактирование текста: видимость/позиция оверлея и контент.
+    in-out property <bool> editing-text: false;
+    in-out property <float> edit-x: 0;
+    in-out property <float> edit-y: 0;
+    in-out property <float> edit-w: 120;
+    in-out property <float> edit-h: 24;
+    in-out property <float> edit-font-size: 16;
+    in-out property <color> edit-color: #e8e8e8;
+    in-out property <string> edit-text: "";
     // Плейсхолдер инспектора при мультивыделении (текст приходит из Rust).
     in-out property <string> sel-hint: "";
 
@@ -168,15 +185,25 @@ export component AppWindow inherits Window {
     callback live-stroke(string);
     callback live-stroke-width(string);
     callback live-corner(int, string);
+    callback live-corner-uniform(string);
+    callback scrub-corner-uniform(float);
+    callback toggle-corner-expand();
+    callback commit-field(int);
     callback open-picker();
     callback open-stroke-picker();
     callback toggle-stroke-dash();
     callback scrub-delta(int, float);
     callback set-layout-mode(int);
+    callback set-layout-direction(int);
+    callback set-layout-align(int);
+    callback set-layout-justify(int);
     callback live-layout-gap(string);
     callback live-layout-padding(string);
     callback scrub-layout-gap(float);
     callback scrub-layout-padding(float);
+    // Текст.
+    callback live-font-size(string);
+    callback set-text-align(int);
     // Color picker.
     callback picker-hue(float);
     callback picker-sv(float, float);
@@ -191,6 +218,9 @@ export component AppWindow inherits Window {
     callback context-requested(float, float);
     callback context-request-layer(int, float);
     callback context-run(string);
+    // Инлайн-редактирование текста.
+    callback edit-text-changed(string);
+    callback edit-finished();
 
     init => { shortcut-scope.focus(); }
     changed palette-open => {
@@ -257,6 +287,14 @@ export component AppWindow inherits Window {
                 debug-text: root.debug-text;
                 active-tool: root.tool;
                 hovered-handle: root.hovered-handle;
+                editing: root.editing-text;
+                edit-x: root.edit-x;
+                edit-y: root.edit-y;
+                edit-w: root.edit-w;
+                edit-h: root.edit-h;
+                edit-font-size: root.edit-font-size;
+                edit-color: root.edit-color;
+                edit-text: root.edit-text;
                 canvas-size-changed(w, h) => {
                     root.canvas-width = w;
                     root.canvas-height = h;
@@ -278,6 +316,8 @@ export component AppWindow inherits Window {
                     root.context-y = (grid.y + canvas.y) / 1px + y;
                     root.context-requested(x, y);
                 }
+                edit-text-changed(t) => { root.edit-text-changed(t); }
+                edit-finished() => { root.edit-finished(); }
             }
 
             // ===== Правая колонка: инспектор + настройки =====
@@ -303,8 +343,16 @@ export component AppWindow inherits Window {
                     sel-corner-tr-text: root.sel-corner-tr-text;
                     sel-corner-br-text: root.sel-corner-br-text;
                     sel-corner-bl-text: root.sel-corner-bl-text;
+                    sel-corner-text: root.sel-corner-text;
+                    sel-corner-expanded: root.sel-corner-expanded;
                     is-frame: root.is-frame;
+                    is-text: root.is-text;
+                    sel-font-size-text: root.sel-font-size-text;
+                    sel-align: root.sel-align;
                     layout-mode: root.layout-mode;
+                    sel-layout-direction: root.sel-layout-direction;
+                    sel-layout-align: root.sel-layout-align;
+                    sel-layout-justify: root.sel-layout-justify;
                     sel-layout-gap: root.sel-layout-gap;
                     sel-layout-padding: root.sel-layout-padding;
                     live-x(t) => { root.live-x(t); }
@@ -317,15 +365,24 @@ export component AppWindow inherits Window {
                     live-stroke(t) => { root.live-stroke(t); }
                     live-stroke-width(t) => { root.live-stroke-width(t); }
                     live-corner(i, t) => { root.live-corner(i, t); }
+                    live-corner-uniform(t) => { root.live-corner-uniform(t); }
+                    scrub-corner-uniform(d) => { root.scrub-corner-uniform(d); }
+                    toggle-corner-expand() => { root.toggle-corner-expand(); }
+                    commit-field(i) => { root.commit-field(i); }
                     open-picker() => { root.open-picker(); }
                     open-stroke-picker() => { root.open-stroke-picker(); }
                     toggle-stroke-dash() => { root.toggle-stroke-dash(); }
                     scrub-delta(i, d) => { root.scrub-delta(i, d); }
                     set-layout-mode(m) => { root.set-layout-mode(m); }
+                    set-layout-direction(d) => { root.set-layout-direction(d); }
+                    set-layout-align(a) => { root.set-layout-align(a); }
+                    set-layout-justify(j) => { root.set-layout-justify(j); }
                     live-layout-gap(t) => { root.live-layout-gap(t); }
                     live-layout-padding(t) => { root.live-layout-padding(t); }
                     scrub-layout-gap(d) => { root.scrub-layout-gap(d); }
                     scrub-layout-padding(d) => { root.scrub-layout-padding(d); }
+                    live-font-size(t) => { root.live-font-size(t); }
+                    set-text-align(a) => { root.set-text-align(a); }
                 }
 
                 Panel {

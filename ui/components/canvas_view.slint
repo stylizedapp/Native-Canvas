@@ -15,6 +15,16 @@ export component CanvasView inherits Rectangle {
     in-out property <float> canvas-width: canvas-area.width / 1px;
     in-out property <float> canvas-height: canvas-area.height / 1px;
 
+    // Инлайн-редактирование текстового узла: оверлей-TextInput поверх холста.
+    in-out property <bool> editing: false;
+    in-out property <float> edit-x: 0;
+    in-out property <float> edit-y: 0;
+    in-out property <float> edit-w: 120;
+    in-out property <float> edit-h: 24;
+    in-out property <float> edit-font-size: 16;
+    in-out property <color> edit-color: #e8e8e8;
+    in-out property <string> edit-text: "";
+
     callback canvas-size-changed(float, float);
     callback pointer-down(int, float, float, bool, bool);
     callback pointer-move(int, float, float);
@@ -23,9 +33,16 @@ export component CanvasView inherits Rectangle {
     callback tool-selected(string);
     // ПКМ отпущена: локальные координаты холста (контекстное меню открывается в Rust).
     callback context-menu(float, float);
+    callback edit-text-changed(string);
+    callback edit-finished();
 
     changed canvas-width => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
     changed canvas-height => { root.canvas-size-changed(root.canvas-width, root.canvas-height); }
+    changed editing => {
+        if (root.editing) {
+            edit-input.focus();
+        }
+    }
 
     function btn(b: PointerEventButton) -> int {
         if (b == PointerEventButton.left) { return 1; }
@@ -100,11 +117,51 @@ export component CanvasView inherits Rectangle {
                 wrap: word-wrap;
             }
         }
+
+        // Инлайн-редактор текстового узла: рамка в акцентном цвете поверх
+        // отрисованного текста, внутри — прозрачный TextInput. Элемент всегда
+        // существует (visible=false), чтобы id был доступен из корня.
+        edit-overlay := Rectangle {
+            visible: root.editing;
+            x: root.edit-x * 1px;
+            y: root.edit-y * 1px;
+            width: root.edit-w * 1px;
+            height: root.edit-h * 1px;
+            background: Theme.canvas-bg;
+            border-radius: 2px;
+            border-width: 1px;
+            border-color: Theme.accent;
+
+            edit-input := TextInput {
+                x: 1px;
+                y: 1px;
+                width: parent.width - 2px;
+                height: parent.height - 2px;
+                text: root.edit-text;
+                color: root.edit-color;
+                font-family: Theme.font-family;
+                font-size: root.edit-font-size * 1px;
+                horizontal-alignment: left;
+                vertical-alignment: top;
+                single-line: false;
+                edited => { root.edit-text-changed(self.text); }
+                accepted() => { root.edit-finished(); }
+                key-pressed(event) => {
+                    if (event.text == "escape") {
+                        root.edit-finished();
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+            }
+        }
     }
 
     // Плавающая панель инструментов: по центру сверху, поверх холста.
+    // Ширина 240px захардкожена и должна совпадать с Toolbar (7 кнопок).
     Toolbar {
-        x: (root.width - 376px) / 2;
+        x: (root.width - 240px) / 2;
         y: Theme.space-2;
         active-tool: root.active-tool;
         tool-selected(t) => { root.tool-selected(t); }

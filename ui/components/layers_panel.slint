@@ -77,8 +77,8 @@ export component LayersPanel inherits ListView {
                     font-size: Theme.font-sm;
                     vertical-alignment: center;
                     horizontal-alignment: left;
-                    padding-left: Theme.space-2;
-                    padding-right: Theme.space-2;
+                    x: Theme.space-2;
+                    width: parent.width - Theme.space-4;
                     init => { self.focus(); }
                     accepted => {
                         root.rename-layer(item.id, self.text);

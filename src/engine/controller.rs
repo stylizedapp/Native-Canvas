@@ -4,11 +4,15 @@ use super::history::History;
 use super::model::document::Document;
 use super::model::nodes::{NodeKey, NodeKind, ShapeKind};
 use super::model::scene::{SceneGraph, SceneNode};
-use super::model::types::{AutoLayoutConfig, Color, Constraints, LayoutDirection, Paint, Stroke};
+use super::model::types::{
+    AutoLayoutConfig, Color, Constraints, LayoutAlign, LayoutDirection, LayoutJustify, Paint, Stroke,
+    TextAlign, TextSizeMode,
+};
 use super::tool::Tool;
 use super::transform::{pick, pick_stack, Camera};
 use crate::engine::serialize::{load_json, save_json};
 use glam::{Affine2, Vec2};
+use std::time::{Duration, Instant};
 
 /// Live-превью создаваемой фигуры (в мировых координатах).
 #[derive(Clone, Debug)]
@@ -95,6 +99,15 @@ pub struct CanvasController {
     pub layer_anchor: Option<NodeKey>,
     /// Внутренний буфер обмена (копии выделенных поддеревьев).
     pub clipboard: Option<Clipboard>,
+    /// Фрейм-цель под курсором во время перетаскивания (подсветка + drop).
+    pub hovered_frame: Option<NodeKey>,
+    /// Последняя flex-конфигурация фрейма — сохраняется при выключении, чтобы
+    /// повторное включение не сбрасывало направление/выравнивание.
+    last_layout: Option<AutoLayoutConfig>,
+    /// Текстовый узел, который сейчас редактируется инлайн-оверлеем.
+    pub editing: Option<NodeKey>,
+    /// (время, ключ) последнего клика в Select — для детекта двойного клика.
+    last_pick: Option<(Instant, NodeKey)>,
 }
 
 /// Буфер обмена: временный граф с копиями выбранных поддеревьев.
@@ -119,6 +132,10 @@ impl CanvasController {
             grid: GridConfig::new(),
             layer_anchor: None,
             clipboard: None,
+            hovered_frame: None,
+            last_layout: None,
+            editing: None,
+            last_pick: None,
         };
         // Стартовое демо-содержимое.
         c.add_root_node(Tool::Frame, Vec2::new(80.0, 80.0), Vec2::new(400.0, 320.0));
@@ -145,16 +162,14 @@ impl CanvasController {
     }
 
     pub fn undo(&mut self) {
-        if let Some(prev) = self.history.undo(&self.scene) {
-            self.scene = prev;
+        if self.history.undo(&mut self.scene) {
             self.scene.clear_selection();
             self.bump_revision();
         }
     }
 
     pub fn redo(&mut self) {
-        if let Some(next) = self.history.redo(&self.scene) {
-            self.scene = next;
+        if self.history.redo(&mut self.scene) {
             self.scene.clear_selection();
             self.bump_revision();
         }
@@ -167,7 +182,76 @@ impl CanvasController {
         self.drag = None;
         self.preview = None;
         self.marquee = None;
+        self.editing = None;
         self.touch();
+    }
+
+    // --- Инлайн-редактирование текста ---
+
+    /// Открывает редактирование текстового узла (возвращает false, если узел
+    /// не текст). Оверлей рисует UI-слой (app.rs) по данным [`CanvasController::editing_view`].
+    pub fn begin_text_edit(&mut self, key: NodeKey) -> bool {
+        let is_text = self
+            .scene
+            .get(key)
+            .map(|n| matches!(n.kind, NodeKind::Text { .. }))
+            .unwrap_or(false);
+        if !is_text {
+            return false;
+        }
+        self.scene.set_selection(vec![key]);
+        self.editing = Some(key);
+        self.touch();
+        true
+    }
+
+    /// Завершает редактирование (фокус ушёл с оверлея или Esc).
+    pub fn end_text_edit(&mut self) {
+        if self.editing.take().is_some() {
+            self.record();
+            self.touch();
+        }
+    }
+
+    /// Обновляет контент текстового узла в процессе редактирования (live).
+    pub fn set_editing_text(&mut self, content: &str) {
+        let Some(key) = self.editing else { return };
+        let Some(n) = self.scene.get_mut(key) else { return };
+        if let NodeKind::Text { content: c, .. } = &mut n.kind {
+            if *c != content {
+                *c = content.to_string();
+                self.scene.mark_subtree_dirty(key);
+                self.touch();
+            }
+        }
+    }
+
+    /// Данные для позиционирования инлайн-оверлея в экранных координатах:
+    /// (контент, позиция, размер, размер шрифта в px экрана, цвет заливки).
+    pub fn editing_view(&self) -> Option<(String, Vec2, Vec2, f32, Color)> {
+        let key = self.editing?;
+        let node = self.scene.get(key)?;
+        let NodeKind::Text { content, font_size, .. } = &node.kind else {
+            return None;
+        };
+        let (mn, mx) = self.scene.world_bbox(key)?;
+        let tl = self.camera.world_to_screen(mn);
+        let br = self.camera.world_to_screen(mx);
+        let color = node
+            .fills
+            .iter()
+            .find_map(|p| match p {
+                Paint::Solid(c) => Some(*c),
+                _ => None,
+            })
+            .unwrap_or(Color::from_rgba8(232, 232, 232, 255));
+        Some((
+            content.clone(),
+            tl,
+            Vec2::new((br.x - tl.x).max(40.0), (br.y - tl.y).max(8.0)),
+            *font_size * self.camera.zoom,
+            color,
+        ))
     }
 
     // --- Сетка / снап ---
@@ -177,8 +261,18 @@ impl CanvasController {
         self.touch();
     }
 
+    pub fn set_grid_visible(&mut self, v: bool) {
+        self.grid.visible = v;
+        self.touch();
+    }
+
     pub fn toggle_snap(&mut self) {
         self.grid.snap = !self.grid.snap;
+        self.touch();
+    }
+
+    pub fn set_snap(&mut self, v: bool) {
+        self.grid.snap = v;
         self.touch();
     }
 
@@ -211,6 +305,7 @@ impl CanvasController {
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
             Tool::Frame => "Frame",
+            Tool::Text => "Text",
             _ => "Node",
         };
         let min = Vec2::new(a.x.min(b.x), a.y.min(b.y));
@@ -238,6 +333,16 @@ impl CanvasController {
                 auto_layout: None,
                 constraints: Constraints::default(),
             },
+            Tool::Text => NodeKind::Text {
+                content: "Text".into(),
+                font_family: "Inter".into(),
+                font_size: 16.0,
+                font_weight: 400,
+                line_height: 1.2,
+                letter_spacing: 0.0,
+                align: TextAlign::Left,
+                size_mode: TextSizeMode::AutoWidth,
+            },
             _ => return NodeKey::default(),
         };
 
@@ -245,9 +350,19 @@ impl CanvasController {
         if let Some(n) = self.scene.get_mut(key) {
             // Линия позиционируется от точки старта (a), а не от min: иначе при
             // перетаскивании в отрицательном направлении она смещалась бы на (min - a).
-            n.local_transform = Affine2::from_translation(if tool == Tool::Line { a } else { min });
-            n.fills = vec![Paint::Solid(Color::from_rgba8(122, 170, 233, 255))];
-            n.strokes = vec![Stroke::solid(Color::from_rgba8(0, 0, 0, 200), 1.0)];
+            // Текст (AutoWidth) — от точки клика; размер высчитывается по контенту.
+            n.local_transform = Affine2::from_translation(if tool == Tool::Line || tool == Tool::Text {
+                a
+            } else {
+                min
+            });
+            if tool == Tool::Text {
+                n.fills = vec![Paint::Solid(Color::from_rgba8(232, 232, 232, 255))];
+                n.strokes.clear();
+            } else {
+                n.fills = vec![Paint::Solid(Color::from_rgba8(122, 170, 233, 255))];
+                n.strokes = vec![Stroke::solid(Color::from_rgba8(0, 0, 0, 200), 1.0)];
+            }
         }
         self.bump_revision();
         key
@@ -288,12 +403,107 @@ impl CanvasController {
             if let Some(n) = self.scene.get_mut(*k) {
                 let t = n.local_transform;
                 n.local_transform = Affine2::from_translation(offset) * t;
-                n.is_world_dirty = true;
             }
+            self.scene.mark_subtree_dirty(*k);
         }
         self.scene.flush_transforms();
         self.scene.set_selection(new_keys);
         self.bump_revision();
+    }
+
+    /// Переносит верхнеуровневые узлы выделения в целевой фрейм (или в корни
+    /// при `None`) с сохранением мировой позиции. Узлы, уже находящиеся
+    /// в целевом фрейме, пропускаются.
+    pub fn reparent_selection(&mut self, target: Option<NodeKey>) {
+        if let Some(t) = target {
+            if !self.scene.contains(t) {
+                return;
+            }
+        }
+        let sel: Vec<NodeKey> = top_level_selected(&self.scene)
+            .into_iter()
+            .filter(|k| self.scene.get(*k).and_then(|n| n.parent) != target)
+            .collect();
+        if sel.is_empty() {
+            return;
+        }
+        if let Some(t) = target {
+            if sel.contains(&t) {
+                return;
+            }
+        }
+        self.record();
+        for key in &sel {
+            self.scene.reparent_preserve_world(*key, target);
+        }
+        self.scene.flush_transforms();
+        self.scene.set_selection(sel);
+        self.bump_revision();
+    }
+
+    /// Обёртывает выделение во Frame («Frame selection», как Ctrl+Alt+G в Figma):
+    /// создаёт фрейм по общей рамке выделения и переносит узлы внутрь.
+    pub fn wrap_in_frame(&mut self) {
+        let sel = top_level_selected(&self.scene);
+        if sel.is_empty() {
+            return;
+        }
+        self.scene.flush_transforms();
+        let mut mn = Vec2::splat(f32::INFINITY);
+        let mut mx = Vec2::splat(f32::NEG_INFINITY);
+        for &k in &sel {
+            if let Some((a, b)) = self.scene.world_bbox(k) {
+                mn = mn.min(a);
+                mx = mx.max(b);
+            }
+        }
+        let pad = 8.0;
+        let size = (mx - mn + Vec2::splat(pad * 2.0)).max(Vec2::new(1.0, 1.0));
+        self.record();
+        let frame_key = self.scene.insert_root(
+            "Frame",
+            NodeKind::Frame {
+                size,
+                clip_content: false,
+                corner_radii: [0.0; 4],
+                auto_layout: None,
+                constraints: Constraints::default(),
+            },
+        );
+        if let Some(n) = self.scene.get_mut(frame_key) {
+            n.local_transform = Affine2::from_translation(mn - Vec2::splat(pad));
+        }
+        self.scene.mark_subtree_dirty(frame_key);
+        self.scene.flush_transforms();
+        for key in &sel {
+            self.scene.reparent_preserve_world(*key, Some(frame_key));
+        }
+        self.scene.flush_transforms();
+        self.scene.set_selection(vec![frame_key]);
+        self.bump_revision();
+    }
+
+    /// Верхний по стеку видимый Frame под мировой точкой, который не входит
+    /// в перемещаемый набор (и не является его потомком).
+    fn drop_frame_at(&mut self, world: Vec2, moving: &[NodeKey]) -> Option<NodeKey> {
+        let stack = pick_stack(&mut self.scene, world);
+        for k in stack {
+            let is_moving = moving
+                .iter()
+                .any(|&m| k == m || self.scene.is_descendant(k, m));
+            if is_moving {
+                continue;
+            }
+            let is_frame = self
+                .scene
+                .get(k)
+                .map(|n| matches!(n.kind, NodeKind::Frame { .. }))
+                .unwrap_or(false);
+            if is_frame {
+                return Some(k);
+            }
+        }
+        None
     }
 
     /// Копирует выделенные поддеревья во внутренний буфер обмена.
@@ -351,8 +561,8 @@ impl CanvasController {
                 if let Some(n) = self.scene.get_mut(*k) {
                     let t = n.local_transform;
                     n.local_transform = Affine2::from_translation(off) * t;
-                    n.is_world_dirty = true;
                 }
+                self.scene.mark_subtree_dirty(*k);
             }
         }
         self.scene.flush_transforms();
@@ -529,6 +739,11 @@ impl CanvasController {
 
     /// Полная версия с `alt` (Alt+Drag — дублирование при перетаскивании).
     pub fn pointer_down_full(&mut self, screen: Vec2, button: u8, ctrl: bool, alt: bool, space: bool) {
+        // Клик по холсту во время редактирования текста завершает его
+        // (оверлей-TextInput лежит поверх TouchArea и свои клики не пропускает).
+        if self.editing.is_some() {
+            self.end_text_edit();
+        }
         // Мировые трансформации актуальны для хит-теста хэндлов и pick.
         self.scene.flush_transforms();
 
@@ -637,6 +852,24 @@ impl CanvasController {
 
                 match pick(&mut self.scene, world) {
                     Some(key) => {
+                        // Двойной клик по текстовому узлу — инлайн-редактирование
+                        // (первый клик запоминаем, второй в окне 400 мс открывает оверлей).
+                        if self
+                            .scene
+                            .get(key)
+                            .map(|n| matches!(n.kind, NodeKind::Text { .. }))
+                            .unwrap_or(false)
+                        {
+                            let dbl = self
+                                .last_pick
+                                .map(|(t, k)| k == key && t.elapsed() < Duration::from_millis(400))
+                                .unwrap_or(false);
+                            self.last_pick = Some((Instant::now(), key));
+                            if dbl {
+                                self.begin_text_edit(key);
+                                return;
+                            }
+                        }
                         let in_selection = self.scene.selection().contains(&key);
                         if in_selection && self.scene.selection().len() > 1 {
                             // Захват для перемещения всего выделения.
@@ -709,6 +942,8 @@ impl CanvasController {
                 // Снап к итоговой позиции: без дрейфа, т.к. база — start_pos.
                 let target = self.snap_point(d.start_pos + (world - d.grab_world));
                 self.scene.set_transform(*key, Affine2::from_translation(target));
+                // Подсветка фрейма-цели (reparent по отпусканию).
+                self.hovered_frame = self.drop_frame_at(world, &[*key]);
                 self.touch();
             }
             DragMode::MoveMany { keys } => {
@@ -721,6 +956,8 @@ impl CanvasController {
                     let target = d.start_positions[i] + delta;
                     self.scene.set_transform(k, Affine2::from_translation(target));
                 }
+                // Подсветка фрейма-цели (reparent по отпусканию).
+                self.hovered_frame = self.drop_frame_at(world, keys);
                 self.touch();
             }
             DragMode::Resize { key, handle } => {
@@ -756,6 +993,17 @@ impl CanvasController {
         self.preview = None;
         self.marquee = None;
 
+        // Reparent по отпусканию: если тащили узел(ы) и есть фрейм-цель.
+        let drop_target = match &d.mode {
+            DragMode::Move { key } => self.hovered_frame.map(|f| (*key, f)),
+            DragMode::MoveMany { keys } => self.hovered_frame.map(|f| {
+                let k = keys.first().copied().unwrap_or_default();
+                (k, f)
+            }),
+            _ => None,
+        };
+        self.hovered_frame = None;
+
         match &d.mode {
             DragMode::Create(tool) => {
                 if let Tool::Rectangle | Tool::Ellipse | Tool::Line | Tool::Frame = tool {
@@ -767,6 +1015,14 @@ impl CanvasController {
                         let key = self.add_root_node(*tool, a, b);
                         self.scene.set_selection(vec![key]);
                     }
+                } else if *tool == Tool::Text {
+                    // Клик с Text-инструментом: создаём узел в точке клика и сразу
+                    // открываем инлайн-редактирование (как в Figma).
+                    let a = self.snap_point(self.camera.screen_to_world(d.anchor_screen));
+                    self.record();
+                    let key = self.add_root_node(Tool::Text, a, a);
+                    self.scene.set_selection(vec![key]);
+                    self.begin_text_edit(key);
                 }
             }
             DragMode::Marquee => {
@@ -778,22 +1034,50 @@ impl CanvasController {
                     let b = self.snap_point(self.camera.screen_to_world(screen));
                     let mn = Vec2::new(a.x.min(b.x), a.y.min(b.y));
                     let mx = Vec2::new(a.x.max(b.x), a.y.max(b.y));
-                    let mut keys = Vec::new();
-                    for key in self.scene.walk() {
-                        let visible = self.scene.get(key).map(|n| n.is_visible).unwrap_or(false);
-                        if visible {
-                            if let Some((n0, n1)) = self.scene.world_bbox(key) {
-                                if gizmo::aabb_intersect(mn, mx, n0, n1) {
-                                    keys.push(key);
-                                }
-                            }
-                        }
-                    }
+                    self.scene.flush_transforms();
+                    let mut keys: Vec<NodeKey> = self
+                        .scene
+                        .spatial_query_rect(mn, mx)
+                        .into_iter()
+                        .filter(|k| {
+                            let visible = self.scene.get(*k).map(|n| n.is_visible).unwrap_or(false);
+                            visible
+                                && self
+                                    .scene
+                                    .world_bbox(*k)
+                                    .map(|(n0, n1)| gizmo::aabb_intersect(mn, mx, n0, n1))
+                                    .unwrap_or(false)
+                        })
+                        .collect();
+                    // Сохраняем порядок отрисовки (как в прежнем обходе walk()).
+                    keys.sort_by_cached_key(|k| crate::engine::spatial::paint_rank(&self.scene, *k));
                     self.scene.set_selection(keys);
                 }
                 self.bump_revision();
             }
-            DragMode::Pan | DragMode::Move { .. } | DragMode::MoveMany { .. } | DragMode::Resize { .. } => {}
+            DragMode::Pan | DragMode::Resize { .. } => {}
+            DragMode::Move { .. } | DragMode::MoveMany { .. } => {
+                match drop_target {
+                    Some((_, frame)) => {
+                        // Фрейм-цель может оказаться потомком перемещаемого узла
+                        // (например, тащим фрейм, а под курсором его дочерний фрейм) —
+                        // reparent сам отклонит цикл.
+                        self.reparent_selection(Some(frame));
+                    }
+                    None => {
+                        // Бросок на пустое место — вытаскиваем из родительского
+                        // фрейма в корни (как Figma).
+                        let inside_frame = self
+                            .scene
+                            .selection()
+                            .iter()
+                            .any(|k| self.scene.get(*k).and_then(|n| n.parent).is_some());
+                        if inside_frame {
+                            self.reparent_selection(None);
+                        }
+                    }
+                }
+            }
         }
         self.touch();
     }
@@ -883,6 +1167,7 @@ impl CanvasController {
 
     fn apply_size(&mut self, w: f32, h: f32) {
         let snapped = self.snap_size(Vec2::new(w.max(1.0), h.max(1.0)));
+        let id = self.selected_id();
         self.apply_selected(false, |n| match &mut n.kind {
             NodeKind::Frame { size, .. } => {
                 *size = snapped;
@@ -895,11 +1180,38 @@ impl CanvasController {
             }
             _ => {}
         });
+        if let Some(id) = id {
+            if self.scene.affects_auto_layout(id) {
+                self.scene.mark_layout_dirty();
+            }
+        }
     }
 
     pub fn apply_opacity_live(&mut self, v: f32) {
         let v = v.clamp(0.0, 1.0);
         self.apply_all_selected(move |n| n.opacity = v);
+    }
+
+    // --- Текст: размер и выравнивание ---
+
+    /// Live-правка размера шрифта выбранных текстовых узлов (AutoWidth
+    /// пересчитает размеры узла при следующем рендере через `text::measure`).
+    pub fn apply_font_size_live(&mut self, fs: f32) {
+        let fs = fs.max(1.0);
+        self.apply_all_selected(move |n| {
+            if let NodeKind::Text { font_size, .. } = &mut n.kind {
+                *font_size = fs;
+            }
+        });
+    }
+
+    /// Устанавливает выравнивание выбранных текстовых узлов.
+    pub fn set_text_align(&mut self, align: TextAlign) {
+        self.apply_selected(true, move |n| {
+            if let NodeKind::Text { align: a, .. } = &mut n.kind {
+                *a = align;
+            }
+        });
     }
 
     pub fn apply_name_live(&mut self, name: &str) {
@@ -1008,6 +1320,37 @@ impl CanvasController {
         });
     }
 
+    /// Равномерный радиус скругления всех углов для всего выделения.
+    pub fn apply_corner_radius_uniform(&mut self, v: f32) {
+        let r = v.max(0.0);
+        self.apply_all_selected(move |n| match &mut n.kind {
+            NodeKind::Frame { corner_radii, .. }
+            | NodeKind::Shape(ShapeKind::Rectangle { corner_radii, .. }) => {
+                *corner_radii = [r, r, r, r];
+            }
+            _ => {}
+        });
+    }
+
+    /// База процента для радиуса: меньшая сторона фигуры (как в Figma).
+    pub fn corner_percent_base(&self) -> Option<f32> {
+        self.selected().and_then(|n| match &n.kind {
+            NodeKind::Frame { size, .. }
+            | NodeKind::Shape(ShapeKind::Rectangle { size, .. }) => Some(size.x.min(size.y)),
+            _ => None,
+        })
+    }
+
+    /// Размер родительского фрейма выбранного узла (база % для W/H).
+    pub fn parent_frame_size(&self) -> Option<Vec2> {
+        let key = self.selected_id()?;
+        let parent = self.scene.get(key)?.parent?;
+        self.scene.get(parent).and_then(|n| match &n.kind {
+            NodeKind::Frame { size, .. } => Some(*size),
+            _ => None,
+        })
+    }
+
     /// Auto-layout выбранного узла (только для Frame).
     pub fn frame_auto_layout(&self) -> Option<AutoLayoutConfig> {
         self.selected().and_then(|n| match &n.kind {
@@ -1016,30 +1359,81 @@ impl CanvasController {
         })
     }
 
-    /// Режим auto-layout выбранного фрейма: 0 = off, 1 = Row, 2 = Column.
-    /// Включая режим, создаём конфиг с текущими отступами; выключая — `None`.
+    /// Режим auto-layout выбранного фрейма: 0 = off, 1 = Flex.
+    /// Включая Flex, создаём конфиг с текущими отступами и направлением;
+    /// выключая — `None`.
     pub fn set_auto_layout_mode(&mut self, mode: u8) {
         self.record();
-        let cur = self.frame_auto_layout().unwrap_or_default();
+        let had_config = self.frame_auto_layout().is_some() || self.last_layout.is_some();
+        let mut cur = self.frame_auto_layout().or(self.last_layout).unwrap_or_default();
+        // Включаем flex на «свежем» фрейме — дети НЕ растягиваются (как в Figma).
+        if mode != 0 && !had_config {
+            cur.align_items = LayoutAlign::Min;
+        }
         self.apply_all_selected(move |n| {
             if let NodeKind::Frame { auto_layout, .. } = &mut n.kind {
                 *auto_layout = match mode {
                     0 => None,
-                    1 => Some(AutoLayoutConfig {
-                        direction: LayoutDirection::Horizontal,
-                        spacing: cur.spacing,
-                        padding: cur.padding,
-                        ..AutoLayoutConfig::default()
-                    }),
-                    _ => Some(AutoLayoutConfig {
-                        direction: LayoutDirection::Vertical,
-                        spacing: cur.spacing,
-                        padding: cur.padding,
-                        ..AutoLayoutConfig::default()
-                    }),
+                    _ => Some(cur),
                 };
             }
         });
+        self.scene.mark_layout_dirty();
+        if mode == 1 {
+            self.last_layout = self.frame_auto_layout();
+        }
+        self.bump_revision();
+    }
+
+    /// Направление flex-раскладки выбранного фрейма: 0 = Row, 1 = Column.
+    pub fn set_auto_layout_direction(&mut self, direction: u8) {
+        self.record();
+        let dir = if direction == 0 { LayoutDirection::Horizontal } else { LayoutDirection::Vertical };
+        self.apply_all_selected(move |n| {
+            if let NodeKind::Frame { auto_layout: Some(cfg), .. } = &mut n.kind {
+                cfg.direction = dir;
+            }
+        });
+        self.scene.mark_layout_dirty();
+        self.last_layout = self.frame_auto_layout();
+        self.bump_revision();
+    }
+
+    /// Выравнивание поперёк оси (0=Stretch, 1=Min, 2=Center, 3=Max).
+    pub fn apply_auto_layout_align(&mut self, align: u8) {
+        self.record();
+        let a = match align {
+            1 => LayoutAlign::Min,
+            2 => LayoutAlign::Center,
+            3 => LayoutAlign::Max,
+            _ => LayoutAlign::Stretch,
+        };
+        self.apply_all_selected(move |n| {
+            if let NodeKind::Frame { auto_layout: Some(cfg), .. } = &mut n.kind {
+                cfg.align_items = a;
+            }
+        });
+        self.scene.mark_layout_dirty();
+        self.last_layout = self.frame_auto_layout();
+        self.bump_revision();
+    }
+
+    /// Распределение вдоль оси (0=Min, 1=Center, 2=Max, 3=SpaceBetween).
+    pub fn apply_auto_layout_justify(&mut self, justify: u8) {
+        self.record();
+        let j = match justify {
+            1 => LayoutJustify::Center,
+            2 => LayoutJustify::Max,
+            3 => LayoutJustify::SpaceBetween,
+            _ => LayoutJustify::Min,
+        };
+        self.apply_all_selected(move |n| {
+            if let NodeKind::Frame { auto_layout: Some(cfg), .. } = &mut n.kind {
+                cfg.justify_content = j;
+            }
+        });
+        self.scene.mark_layout_dirty();
+        self.last_layout = self.frame_auto_layout();
         self.bump_revision();
     }
 
@@ -1051,6 +1445,8 @@ impl CanvasController {
                 cfg.spacing = v;
             }
         });
+        self.scene.mark_layout_dirty();
+        self.last_layout = self.frame_auto_layout();
         self.bump_revision();
     }
 
@@ -1062,6 +1458,8 @@ impl CanvasController {
                 cfg.padding = [v, v, v, v];
             }
         });
+        self.scene.mark_layout_dirty();
+        self.last_layout = self.frame_auto_layout();
         self.bump_revision();
     }
 
@@ -1259,6 +1657,9 @@ impl CanvasController {
             n.local_transform = gizmo::scale_transform(mn, mn + size, lmin, lmax);
         }
         self.scene.mark_subtree_dirty(key);
+        if self.scene.affects_auto_layout(key) {
+            self.scene.mark_layout_dirty();
+        }
         self.touch();
     }
 
@@ -1302,6 +1703,9 @@ impl CanvasController {
         let doc = load_json(data).map_err(|e| e.to_string())?;
         self.record();
         self.scene = doc.scene;
+        // Мир и кэши могут быть в любом состоянии — помечаем всё грязным,
+        // чтобы первый же flush пересчитал трансформации и spatial-индекс.
+        self.scene.invalidate_all();
         self.bump_revision();
         Ok(())
     }
@@ -1325,6 +1729,16 @@ fn kind_for_tool(tool: Tool) -> NodeKind {
             corner_radii: [0.0; 4],
             auto_layout: None,
             constraints: Constraints::default(),
+        },
+        Tool::Text => NodeKind::Text {
+            content: "Text".into(),
+            font_family: "Inter".into(),
+            font_size: 16.0,
+            font_weight: 400,
+            line_height: 1.2,
+            letter_spacing: 0.0,
+            align: TextAlign::Left,
+            size_mode: TextSizeMode::AutoWidth,
         },
         _ => NodeKind::Shape(ShapeKind::Rectangle { size: Vec2::ONE, corner_radii: [0.0; 4] }),
     }
@@ -1444,6 +1858,40 @@ mod tests {
             };
             assert_eq!(r[0], 12.0);
         }
+    }
+
+    #[test]
+    fn uniform_corner_sets_all_radii() {
+        let mut c = CanvasController::new();
+        c.select(c.scene.roots()[1]); // Rectangle
+        c.apply_corner_radius_uniform(8.5);
+        let r = c.corners().unwrap();
+        assert_eq!(r, [8.5, 8.5, 8.5, 8.5]);
+        c.apply_corner_radius_uniform(-3.0);
+        assert_eq!(c.corners().unwrap(), [0.0; 4]);
+    }
+
+    #[test]
+    fn corner_percent_base_is_min_side() {
+        let mut c = CanvasController::new();
+        // Первый корень — Frame 320×240: база = 240.
+        c.select(c.scene.roots()[0]);
+        assert_eq!(c.corner_percent_base(), Some(240.0));
+        // Ellipse без скругления — базы нет.
+        c.select(c.scene.roots()[2]);
+        assert_eq!(c.corner_percent_base(), None);
+    }
+
+    #[test]
+    fn parent_frame_size_axis() {
+        let mut c = CanvasController::new();
+        // Rectangle/Frame/… на корневом уровне — родителя-фрейма нет.
+        assert_eq!(c.parent_frame_size(), None);
+        // Вложим Rectangle в корневой Frame: база = размер фрейма (320×240).
+        let rect = c.scene.roots()[1];
+        c.scene.reparent_preserve_world(rect, Some(c.scene.roots()[0]));
+        c.select(rect);
+        assert_eq!(c.parent_frame_size(), Some(Vec2::new(320.0, 240.0)));
     }
 
     #[test]
@@ -1791,7 +2239,7 @@ mod tests {
     fn copy_paste_roundtrip() {
         let mut c = CanvasController::new();
         let a = c.scene.roots()[0];
-        let child = c.scene.insert_child(a, "Child", kind_for_tool(Tool::Rectangle)).unwrap();
+        let _child = c.scene.insert_child(a, "Child", kind_for_tool(Tool::Rectangle)).unwrap();
         c.select(a);
         let before = c.scene.roots().len();
         c.copy_selection();
@@ -1863,5 +2311,332 @@ mod tests {
         // Оригинал не сдвинулся, копия уехала от него.
         assert_eq!(ta, Vec2::new(80.0, 80.0));
         assert!((tc - Vec2::new(80.0, 80.0)).length() > 10.0);
+    }
+
+    #[test]
+    fn reparent_selection_moves_into_frame_preserving_world() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        let frame = c.scene.roots()[0];
+        let rect = c.scene.roots()[1];
+        c.select(rect);
+        c.scene.flush_transforms();
+        let (mn, mx) = c.scene.world_bbox(rect).unwrap();
+
+        c.reparent_selection(Some(frame));
+
+        assert_eq!(c.scene.get(rect).unwrap().parent, Some(frame));
+        c.scene.flush_transforms();
+        let (mn2, mx2) = c.scene.world_bbox(rect).unwrap();
+        assert!((mn - mn2).length() < 0.01);
+        assert!((mx - mx2).length() < 0.01);
+        // Узел больше не в корнях.
+        assert!(!c.scene.roots().contains(&rect));
+    }
+
+    #[test]
+    fn reparent_selection_to_root_removes_from_frame() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        let rect = c.scene.roots()[1];
+        c.select(rect);
+        c.reparent_selection(Some(frame));
+        assert_eq!(c.scene.get(rect).unwrap().parent, Some(frame));
+
+        c.reparent_selection(None);
+        assert_eq!(c.scene.get(rect).unwrap().parent, None);
+        assert!(c.scene.roots().contains(&rect));
+    }
+
+    #[test]
+    fn reparent_selection_same_parent_is_noop() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        let rect = c.scene.roots()[1];
+        c.select(rect);
+        c.reparent_selection(Some(frame));
+        // Повторный перенос в тот же родитель ничего не меняет (не переупорядочивает).
+        let before: Vec<NodeKey> = c.scene.get(frame).unwrap().children.clone();
+        c.reparent_selection(Some(frame));
+        let after: Vec<NodeKey> = c.scene.get(frame).unwrap().children.clone();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn wrap_in_frame_creates_parent_for_selection() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        let rect = c.scene.roots()[1];
+        let ellipse = c.scene.roots()[2];
+        c.scene.set_selection(vec![rect, ellipse]);
+        c.scene.flush_transforms();
+        let (rmn, _rmx) = c.scene.world_bbox(rect).unwrap();
+        let (_emn, emx) = c.scene.world_bbox(ellipse).unwrap();
+
+        c.wrap_in_frame();
+
+        assert_eq!(c.scene.selection().len(), 1);
+        let fk = c.scene.selection()[0];
+        assert!(matches!(c.scene.get(fk).unwrap().kind, NodeKind::Frame { .. }));
+        assert_eq!(c.scene.get(rect).unwrap().parent, Some(fk));
+        assert_eq!(c.scene.get(ellipse).unwrap().parent, Some(fk));
+        // Фрейм охватывает оба узла; мировые позиции детей сохранены.
+        let (fmn, fmx) = c.scene.world_bbox(fk).unwrap();
+        assert!(fmn.x <= rmn.x && fmn.y <= rmn.y);
+        assert!(fmx.x >= emx.x && fmx.y >= emx.y);
+        c.scene.flush_transforms();
+        assert!((c.scene.world_bbox(rect).unwrap().0 - rmn).length() < 0.01);
+        assert!((c.scene.world_bbox(ellipse).unwrap().1 - emx).length() < 0.01);
+    }
+
+    #[test]
+    fn drag_into_frame_reparents_on_pointer_up() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        let frame = c.scene.roots()[0];
+        let ellipse = c.scene.roots()[2];
+        let world = Vec2::new(330.0, 245.0); // центр эллипса
+        let screen = c.camera.world_to_screen(world);
+
+        c.pointer_down_full(screen, 1, false, false, false);
+        assert!(matches!(c.drag.as_ref().unwrap().mode, DragMode::Move { key } if key == ellipse));
+
+        // Тащим в угол фрейма (внутрь Frame, но мимо Rect/Ellipse).
+        let drop_world = Vec2::new(100.0, 300.0);
+        let drop_screen = c.camera.world_to_screen(drop_world);
+        c.pointer_move(drop_screen);
+        assert_eq!(c.hovered_frame, Some(frame));
+
+        c.pointer_up(drop_screen);
+        assert_eq!(c.scene.get(ellipse).unwrap().parent, Some(frame));
+        assert!(c.hovered_frame.is_none());
+    }
+
+    #[test]
+    fn drag_outside_any_frame_does_not_reparent() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        let ellipse = c.scene.roots()[2];
+        let world = Vec2::new(330.0, 245.0);
+        let screen = c.camera.world_to_screen(world);
+        c.pointer_down_full(screen, 1, false, false, false);
+
+        // Точка вне всех фреймов.
+        let drop_screen = c.camera.world_to_screen(Vec2::new(500.0, 100.0));
+        c.pointer_move(drop_screen);
+        assert_eq!(c.hovered_frame, None);
+        c.pointer_up(drop_screen);
+        assert_eq!(c.scene.get(ellipse).unwrap().parent, None);
+    }
+
+    #[test]
+    fn drop_frame_at_skips_moving_subtree() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        // Тащим сам фрейм — цель не должна указывать на него (или его потомков).
+        let world = Vec2::new(100.0, 100.0);
+        assert_ne!(c.drop_frame_at(world, &[frame]), Some(frame));
+    }
+
+    #[test]
+    fn flex_mode_preserves_direction_and_resets_off() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        c.select(frame);
+
+        c.set_auto_layout_mode(1);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.direction), Some(LayoutDirection::Horizontal));
+
+        c.set_auto_layout_direction(1);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.direction), Some(LayoutDirection::Vertical));
+
+        // Выключение → None; повторное включение сохраняет направление.
+        c.set_auto_layout_mode(0);
+        assert_eq!(c.frame_auto_layout(), None);
+        c.set_auto_layout_mode(1);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.direction), Some(LayoutDirection::Vertical));
+    }
+
+    #[test]
+    fn flex_align_and_justify_setters() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        c.select(frame);
+        c.set_auto_layout_mode(1);
+
+        c.apply_auto_layout_align(2);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.align_items), Some(LayoutAlign::Center));
+        c.apply_auto_layout_justify(3);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.justify_content), Some(LayoutJustify::SpaceBetween));
+        c.apply_auto_layout_align(0);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.align_items), Some(LayoutAlign::Stretch));
+        c.apply_auto_layout_justify(1);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.justify_content), Some(LayoutJustify::Center));
+    }
+
+    #[test]
+    fn drag_out_of_frame_goes_to_root_on_empty_drop() {
+        let mut c = CanvasController::new();
+        c.grid.snap = false;
+        let frame = c.scene.roots()[0];
+        let rect = c.scene.roots()[1];
+        c.select(rect);
+        c.reparent_selection(Some(frame));
+        assert_eq!(c.scene.get(rect).unwrap().parent, Some(frame));
+
+        // Тащим ребёнка на пустое место (вне всех фреймов) и отпускаем.
+        let screen = c.camera.world_to_screen(Vec2::new(200.0, 180.0));
+        c.pointer_down_full(screen, 1, false, false, false);
+        let drop_screen = c.camera.world_to_screen(Vec2::new(900.0, 700.0));
+        c.pointer_move(drop_screen);
+        assert_eq!(c.hovered_frame, None);
+        c.pointer_up(drop_screen);
+        assert_eq!(c.scene.get(rect).unwrap().parent, None);
+        assert!(c.scene.roots().contains(&rect));
+    }
+
+    #[test]
+    fn enabling_flex_does_not_stretch_children() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        let r1 = c.scene.insert_child(frame, "R1", NodeKind::Shape(ShapeKind::Rectangle { size: Vec2::new(50.0, 20.0), corner_radii: [0.0; 4] })).unwrap();
+        let r2 = c.scene.insert_child(frame, "R2", NodeKind::Shape(ShapeKind::Rectangle { size: Vec2::new(50.0, 20.0), corner_radii: [0.0; 4] })).unwrap();
+        c.select(frame);
+        c.set_auto_layout_mode(1);
+        c.scene.flush_transforms();
+        // Дети НЕ растянуты по высоте фрейма (align=Min, а не Stretch).
+        let (a, b) = c.scene.get(r1).unwrap().kind.local_bbox();
+        assert!((b.y - a.y - 20.0).abs() < 0.01, "r1 высота={}", b.y - a.y);
+        assert_eq!(c.frame_auto_layout().map(|cfg| cfg.align_items), Some(LayoutAlign::Min));
+        let _ = r2;
+    }
+
+    #[test]
+    fn flex_align_center_positions_children() {
+        let mut c = CanvasController::new();
+        let frame = c.scene.roots()[0];
+        // Кладём два прямоугольника во фрейм как детей.
+        let r1 = c.scene.insert_child(frame, "R1", NodeKind::Shape(ShapeKind::Rectangle { size: Vec2::new(50.0, 20.0), corner_radii: [0.0; 4] })).unwrap();
+        let r2 = c.scene.insert_child(frame, "R2", NodeKind::Shape(ShapeKind::Rectangle { size: Vec2::new(50.0, 20.0), corner_radii: [0.0; 4] })).unwrap();
+        // Фрейм без трансформации, flex Row, align Center, justify Center, gap 10.
+        if let Some(n) = c.scene.get_mut(frame) {
+            if let NodeKind::Frame { size, auto_layout, .. } = &mut n.kind {
+                *size = Vec2::new(300.0, 100.0);
+                *auto_layout = Some(AutoLayoutConfig {
+                    direction: LayoutDirection::Horizontal,
+                    spacing: 10.0,
+                    padding: [0.0; 4],
+                    align_items: LayoutAlign::Center,
+                    justify_content: LayoutJustify::Center,
+                });
+            }
+        }
+        c.scene.flush_transforms();
+        let t1 = c.scene.world_transform(r1).unwrap().translation;
+        let t2 = c.scene.world_transform(r2).unwrap().translation;
+        // Фрейм в (80,80); ряд: суммарная ширина 110 + gap 10, свободные 180 →
+        // начало в 80+95=175; второй в 80+155=235.
+        assert!((t1.x - 175.0).abs() < 0.01, "t1.x={}", t1.x);
+        assert!((t2.x - 235.0).abs() < 0.01, "t2.x={}", t2.x);
+        // Центр по Y: 80 + (100-20)/2 = 120.
+        assert!((t1.y - 120.0).abs() < 0.01, "t1.y={}", t1.y);
+        assert!((t2.y - 120.0).abs() < 0.01, "t2.y={}", t2.y);
+    }
+
+    // --- Текстовые узлы ---
+
+    #[test]
+    fn text_tool_click_creates_and_edits() {
+        let mut c = CanvasController::new();
+        c.set_tool(Tool::Text);
+        c.grid.snap = false;
+        // Клик (без драга): создание узла в точке клика + сразу редактирование.
+        c.pointer_down(Vec2::new(50.0, 60.0), 1);
+        c.pointer_up(Vec2::new(50.0, 60.0));
+        let key = c.scene.selection()[0];
+        assert!(matches!(c.scene.get(key).unwrap().kind, NodeKind::Text { .. }));
+        // Позиция узла = точка клика (AutoWidth).
+        assert_eq!(c.scene.get(key).unwrap().local_transform.translation, Vec2::new(50.0, 60.0));
+        assert_eq!(c.editing, Some(key));
+        c.end_text_edit();
+        assert_eq!(c.editing, None);
+    }
+
+    #[test]
+    fn text_bbox_measured_from_content() {
+        let mut c = CanvasController::new();
+        let key = c.scene.insert_root(
+            "Text",
+            NodeKind::Text {
+                content: "Hello".into(),
+                font_family: "Inter".into(),
+                font_size: 16.0,
+                font_weight: 400,
+                line_height: 1.2,
+                letter_spacing: 0.0,
+                align: TextAlign::Left,
+                size_mode: TextSizeMode::AutoWidth,
+            },
+        );
+        c.scene.flush_transforms();
+        let (mn, mx) = c.scene.world_bbox(key).unwrap();
+        assert!(mx.x > 0.0);
+        assert!((mx.y - 16.0 * 1.2).abs() < 0.01);
+        assert_eq!(mn, Vec2::ZERO);
+    }
+
+    #[test]
+    fn text_edit_live_updates_content() {
+        let mut c = CanvasController::new();
+        let key = c.scene.insert_root(
+            "Text",
+            NodeKind::Text {
+                content: "Hello".into(),
+                font_family: "Inter".into(),
+                font_size: 16.0,
+                font_weight: 400,
+                line_height: 1.2,
+                letter_spacing: 0.0,
+                align: TextAlign::Left,
+                size_mode: TextSizeMode::AutoWidth,
+            },
+        );
+        c.begin_text_edit(key);
+        c.set_editing_text("World!");
+        c.end_text_edit();
+        let n = c.scene.get(key).unwrap();
+        if let NodeKind::Text { content, .. } = &n.kind {
+            assert_eq!(content, "World!");
+        } else {
+            panic!("не Text");
+        }
+    }
+
+    #[test]
+    fn text_align_and_font_size_apply() {
+        let mut c = CanvasController::new();
+        let key = c.scene.insert_root(
+            "Text",
+            NodeKind::Text {
+                content: "Hi".into(),
+                font_family: "Inter".into(),
+                font_size: 16.0,
+                font_weight: 400,
+                line_height: 1.2,
+                letter_spacing: 0.0,
+                align: TextAlign::Left,
+                size_mode: TextSizeMode::AutoWidth,
+            },
+        );
+        c.scene.set_selection(vec![key]);
+        c.set_text_align(TextAlign::Center);
+        c.apply_font_size_live(24.0);
+        let n = c.scene.get(key).unwrap();
+        if let NodeKind::Text { font_size, align, .. } = &n.kind {
+            assert_eq!(*align, TextAlign::Center);
+            assert_eq!(*font_size, 24.0);
+        } else {
+            panic!("не Text");
+        }
     }
 }

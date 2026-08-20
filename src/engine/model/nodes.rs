@@ -149,14 +149,9 @@ impl NodeKind {
                     Vec2::new(r.max_x() as f32, r.max_y() as f32),
                 )
             }
-            NodeKind::Text { content, font_size, size_mode, .. } => {
-                let chars = content.chars().count() as f32;
-                let fs = *font_size;
-                let w = match size_mode {
-                    TextSizeMode::Fixed => 100.0,
-                    _ => (chars * fs * 0.55).max(fs),
-                };
-                (Vec2::ZERO, Vec2::new(w, fs * 1.2))
+            NodeKind::Text { .. } => {
+                let size = crate::engine::text::measure(self);
+                (Vec2::ZERO, size)
             }
             NodeKind::Group | NodeKind::Component { .. } | NodeKind::BooleanGroup { .. } => {
                 (Vec2::ZERO, Vec2::ZERO)

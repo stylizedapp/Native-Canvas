@@ -19,6 +19,33 @@ pub fn eval(input: &str) -> Option<f32> {
     Some(value)
 }
 
+/// Результат разбора поля инспектора: готовое число или процент от базы поля.
+/// `50%` для W/H — процент от размера родительского фрейма, для радиуса —
+/// от меньшей стороны фигуры. Арифметика (`100*50%`) даёт готовое число
+/// (50% внутри выражения = 0.5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Value {
+    /// Число как есть (результат арифметики).
+    Plain(f32),
+    /// Процент от базы поля: 50% → 0.5.
+    Percent(f32),
+}
+
+/// Разбирает ввод с учётом контекста: одиночный суффикс `%` — процент от базы,
+/// иначе — обычное арифметическое выражение (внутри него `%` = деление на 100).
+pub fn parse(input: &str) -> Option<Value> {
+    let s = input.trim();
+    if let Some(num) = s.strip_suffix('%') {
+        let num = num.trim();
+        if let Ok(n) = num.parse::<f32>() {
+            return Some(Value::Percent(n / 100.0));
+        }
+        // «100*50%» — % внутри выражения обрабатывает eval.
+        return eval(s).map(Value::Plain);
+    }
+    eval(s).map(Value::Plain)
+}
+
 /// Число или простое выражение без пробелов между токенами? Нет — выражение
 /// может содержать пробелы; `parse::<f32>` покрывает чистые числа, но для
 /// единообразия весь парсинг идёт через `eval`.
@@ -201,5 +228,17 @@ mod tests {
         assert_eq!(eval("(1+2"), None);
         assert_eq!(eval("1 2"), None);
         assert_eq!(eval("--5"), Some(5.0));
+    }
+
+    #[test]
+    fn parse_percent_vs_plain() {
+        assert_eq!(parse("50%"), Some(Value::Percent(0.5)));
+        assert_eq!(parse("25.5%"), Some(Value::Percent(0.255)));
+        assert_eq!(parse("100"), Some(Value::Plain(100.0)));
+        assert_eq!(parse("100+50"), Some(Value::Plain(150.0)));
+        assert_eq!(parse("100*50%"), Some(Value::Plain(50.0)));
+        assert_eq!(parse(""), None);
+        assert_eq!(parse("abc"), None);
+        assert_eq!(parse("%"), None);
     }
 }

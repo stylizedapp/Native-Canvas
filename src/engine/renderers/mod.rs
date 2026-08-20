@@ -32,6 +32,9 @@ pub const GIZMO_HANDLE_STROKE: [u8; 4] = [0x5b, 0x8c, 0xff, 0xff];
 /// Marquee: заливка и рамка.
 pub const MARQUEE_FILL: [u8; 4] = [0x5b, 0x8c, 0xff, 26];
 pub const MARQUEE_STROKE: [u8; 4] = [0x6e, 0x9a, 0xff, 0xff];
+/// Подсветка фрейма-цели при перетаскивании (drop-таргет).
+pub const DROP_FILL: [u8; 4] = [0x5b, 0x8c, 0xff, 40];
+pub const DROP_STROKE: [u8; 4] = [0x5b, 0x8c, 0xff, 0xff];
 /// Маркер начала координат (0,0) — для визуальной проверки пана/зума.
 pub const ORIGIN: [u8; 4] = [0xff, 0x9f, 0x43, 0xff];
 
@@ -67,6 +70,7 @@ pub trait Renderer {
         grid: GridConfig,
         preview: Option<Preview>,
         marquee: Option<(Vec2, Vec2)>,
+        hovered: Option<NodeKey>,
         out: &mut [u8],
     ) -> RenderOutcome;
 }
@@ -161,4 +165,46 @@ pub(crate) fn world_bbox(kind: &NodeKind, world: Affine2) -> (Vec2, Vec2) {
 
 pub(crate) fn rects_intersect(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
     a0.x <= b1.x && a1.x >= b0.x && a0.y <= b1.y && a1.y >= b0.y
+}
+
+/// Контейнер, реально обрезающий своё содержимое: дети за его границами
+/// не видны. Только такие узлы можно иерархически отсекать по viewport —
+/// у Group/Component bbox вырожден, а Frame без `clip_content` может иметь
+/// детей вне своих границ, поэтому их дети обходятся всегда.
+pub(crate) fn clips_children(node: &super::model::scene::SceneNode) -> bool {
+    matches!(node.kind, NodeKind::Frame { clip_content: true, .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::model::nodes::ShapeKind;
+    use super::super::model::scene::SceneNode;
+    use super::super::model::types::Constraints;
+
+    fn frame(clip: bool) -> SceneNode {
+        SceneNode::new(
+            "F",
+            NodeKind::Frame {
+                size: glam::Vec2::new(10.0, 10.0),
+                clip_content: clip,
+                corner_radii: [0.0; 4],
+                auto_layout: None,
+                constraints: Constraints::default(),
+            },
+        )
+    }
+
+    #[test]
+    fn clips_children_only_for_clipped_frames() {
+        assert!(clips_children(&frame(true)));
+        assert!(!clips_children(&frame(false)));
+        let group = SceneNode::new("G", NodeKind::Group);
+        assert!(!clips_children(&group));
+        let rect = SceneNode::new(
+            "R",
+            NodeKind::Shape(ShapeKind::Rectangle { size: glam::Vec2::new(5.0, 5.0), corner_radii: [0.0; 4] }),
+        );
+        assert!(!clips_children(&rect));
+    }
 }

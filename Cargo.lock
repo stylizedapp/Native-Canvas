@@ -2906,6 +2906,7 @@ dependencies = [
 name = "native_canvas"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "dirs",
  "glam",
  "instant",

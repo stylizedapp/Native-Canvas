@@ -1,7 +1,7 @@
 ﻿use super::{
-    rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, GIZMO_HANDLE_FILL,
-    GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN, PAGE_BG, PAGE_BORDER,
-    PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
+    clips_children, rects_intersect, world_bbox, RenderOutcome, Renderer, CANVAS_BG, DROP_FILL,
+    DROP_STROKE, GIZMO_HANDLE_FILL, GIZMO_HANDLE_STROKE, GRID, MARQUEE_FILL, MARQUEE_STROKE, ORIGIN,
+    PAGE_BG, PAGE_BORDER, PREVIEW_FILL, PREVIEW_STROKE, SELECTION, PAGE_SIZE,
 };
 use super::super::grid::GridConfig;
 use super::super::model::nodes::{NodeKey, NodeKind, ShapeKind};
@@ -166,6 +166,7 @@ impl Renderer for VelloRenderer {
         grid: GridConfig,
         preview: Option<Preview>,
         marquee: Option<(Vec2, Vec2)>,
+        hovered: Option<NodeKey>,
         out: &mut [u8],
     ) -> RenderOutcome {
         let t_total = Instant::now();
@@ -219,25 +220,28 @@ impl Renderer for VelloRenderer {
             stroke_shape(&mut vs, cam_t, rgba8(GRID, 1.0), (1.0 / zoom) as f64, &pb);
         }
 
-        // Однопроходный обход дерева с накопленной трансформацией (O(n)).
-        let mut stack: Vec<(NodeKey, Affine2)> = scene
-            .roots()
-            .iter()
-            .rev()
-            .map(|&key| (key, Affine2::IDENTITY))
-            .collect();
-        while let Some((key, acc)) = stack.pop() {
+        // Однопроходный обход дерева по кэшированным мировым трансформациям (O(n)).
+        // Стек хранит только ключи: трансформации уже посчитаны в `flush_transforms`.
+        let mut stack: Vec<NodeKey> = scene.roots().iter().rev().copied().collect();
+        while let Some(key) = stack.pop() {
             let Some(node) = scene.get(key) else { continue };
             if !node.is_visible {
                 continue;
             }
-            let world = acc * node.local_transform;
+            let world = node.world_transform;
             let (mn, mx) = world_bbox(&node.kind, world);
-            if rects_intersect(mn, mx, view_min, view_max) {
+            let visible = rects_intersect(mn, mx, view_min, view_max);
+            if visible {
                 let screen = to_affine(cam_affine * world);
                 draw_node(&mut vs, node, screen);
             }
-            stack.extend(node.children.iter().rev().map(|&ch| (ch, world)));
+            // Иерархический culling: у обрезанного контейнера вне вьюпорта детей
+            // рисовать незачем; у остальных нод (вырожденный bbox / без clip)
+            // спускаемся, чтобы не потерять видимых детей.
+            let cull_children = clips_children(node) && !visible;
+            if !cull_children {
+                stack.extend(node.children.iter().rev().copied());
+            }
         }
 
         // Подсветка выделенных узлов. Хэндлы гизмо — при ровно одном узле.
@@ -254,6 +258,15 @@ impl Renderer for VelloRenderer {
                         draw_gizmo_handles(&mut vs, cam_t, mn, mx, zoom);
                     }
                 }
+            }
+        }
+
+        // Подсветка фрейма-цели при перетаскивании (drop-таргет).
+        if let Some(h) = hovered {
+            if let Some((mn, mx)) = scene.world_bbox(h) {
+                let rect = kurbo::Rect::new(mn.x as f64, mn.y as f64, mx.x as f64, mx.y as f64);
+                fill_shape(&mut vs, cam_t, rgba8(DROP_FILL, 1.0), &rect);
+                stroke_shape(&mut vs, cam_t, rgba8(DROP_STROKE, 1.0), (2.0 / zoom) as f64, &rect);
             }
         }
 
@@ -561,6 +574,18 @@ fn draw_node(scene: &mut VelloScene, node: &SceneNode, screen: kurbo::Affine) {
             let ry = radii.y as f64 / 2.0;
             let ell = kurbo::Ellipse::new((rx, ry), (rx, ry), 0.0);
             draw_filled(scene, node, screen, &ell);
+        }
+        NodeKind::Text { .. } => {
+            if let Some(f) = solid_fill(node) {
+                if node.opacity > 0.0 {
+                    let brush = Brush::Solid(rgba8(f, node.opacity));
+                    for line in crate::engine::text::layout(&node.kind) {
+                        for glyph in &line.glyphs {
+                            scene.fill(Fill::NonZero, screen, brush.clone(), None, glyph);
+                        }
+                    }
+                }
+            }
         }
         NodeKind::Shape(ShapeKind::Line { start, end }) => {
             if let Some(st) = node.strokes.first() {

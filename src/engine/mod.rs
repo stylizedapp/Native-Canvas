@@ -1,6 +1,7 @@
 pub mod model;
 pub mod gizmo;
 pub mod transform;
+pub mod spatial;
 pub mod grid;
 pub mod tool;
 pub mod renderers;
@@ -11,3 +12,4 @@ pub mod color;
 pub mod expr;
 pub mod serialize;
 pub mod profiler;
+pub mod text;
